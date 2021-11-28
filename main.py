@@ -1,7 +1,7 @@
 
 from __future__ import annotations
-import pprint
-from typing import Iterator, Type
+from abc import abstractmethod
+from typing import Iterator, List, Type
 
 """ Registry Manipulations"""
 
@@ -38,15 +38,17 @@ def tryAddToRegistry(path : str, regKeyName : str, all_users : bool = False):
 
 import json
 
-ERROR = "Error: "
-WARNING = "Wraning: "
+ERROR = "Error"
+WARNING = "Warning"
 
-def raiseError(message : str):
-    print(ERROR + message)
+INCORRECT_CONFIG_CAT = "Incorrect configuration"
+
+def raiseError(message : str, category : str):
+    print(f"{ERROR}: {category}. {message}")
     raise Exception(message)
 
-def raiseWarning(message : str):
-    print(WARNING + message)
+def raiseWarning(message : str, category : str):
+    print(f"{WARNING}: {category}. {message}")
 
 def pathIfExists(filePath : str) -> str | None:
     if filePath and path.exists(filePath):
@@ -59,7 +61,7 @@ def existentPaths(paths : Iterator[str]) -> Iterator[str]:
     for p in paths:
         existentPath = pathIfExists(p)
         if existentPath:
-            yield existentPath
+            yield path.abspath(str(existentPath))
 
 
 class CustomJsonEncoder(json.JSONEncoder):
@@ -83,90 +85,107 @@ PATHS = 'paths'
 TARGET_PATH = 'targetPath'
 
 
-class Exclude:
-    paths : list[str]
-    includes : list[Include]
+class ConfigurationRule:
+    @abstractmethod
+    def accept(self, visitor : ConfigurationVisitor):
+        pass
 
-    def __init__(self, paths : list[str], includes : list[Include]) -> None:
-        self.paths = paths
-        self.includes = includes
+# class Exclude(ConfigurationRule):
+#     paths : list[str]
+#     includes : list[Include]
 
-    @staticmethod
-    def parseIncludes(obj : dict, defaultTargetPath = None) -> list[Include] | None:
-        includesObj = obj.get(INCLUDES)
-        if includesObj and len(includesObj) > 0:  
-            includes = [Include.fromObject(obj, defaultTargetPath) for obj in includesObj if obj]
-            includes = list(filter(None, includes))
-            if len(includes) > 0:
-                return includes
-        return None
+#     def __init__(self, paths : list[str], includes : list[Include]) -> None:
+#         self.paths = paths
+#         self.includes = includes
         
-    @staticmethod
-    def fromObject(obj : dict, defaultTargetPath = None) -> Exclude:
-        paths = list(obj.get(PATHS))
-        if paths:
-            paths = list(existentPaths(paths))
-        else:
-            return None
+#     @staticmethod
+#     def fromObject(obj : dict, defaultTargetPath = None) -> Exclude:
+#         paths = list(obj.get(PATHS))
+#         if paths:
+#             paths = list(existentPaths(paths))
+#         else:
+#             return None
 
-        includes = Exclude.parseIncludes(obj, defaultTargetPath)
+#         includes = Exclude.parseIncludes(obj, defaultTargetPath)
 
-        return Exclude(paths, includes)
+#         return Exclude(paths, includes)
     
-    def __repr__(self) -> str:
-        return str(self.__dict__)
+#     def accept(self, visitor : ConfigurationVisitor):
+#         visitor.visitExclude(self)
+    
+#     def __repr__(self) -> str:
+#         return str(self.__dict__)
 
-class Include:
-    includesPaths : list[str]
+class Include(ConfigurationRule):
+    includePaths : list[str]
     targetPath : str
-    excludes : list[Exclude]
+    excludes : list[str]
 
-    def __init__(self, includes : list[str], targetPath : str, excludes : list[Exclude]) -> None:
-        self.includesPaths = includes
+    def __init__(self, includes : list[str], targetPath : str, excludes : list[str]) -> None:
+        self.includePaths = includes
         self.targetPath = targetPath
         self.excludes = excludes
 
     @staticmethod
-    def fromObject(obj : dict, defaultTargetPath = None) -> Include:
+    def fromObject(obj : dict) -> Include:
         paths = list(obj.get(PATHS))
-        if paths:
-            #paths = list(filter(None, paths))
-            paths = list(existentPaths(paths)) #[realPath for realPath in paths if realPath and path.exists(realPath)]
-        else:
-            return None
+        if not paths or not len(paths):
+            raiseError("You have not specified any include paths")
         
-        targetPath = obj.get(TARGET_PATH)
+        paths = list(existentPaths(paths))
+
+        if not len(paths):
+            raiseError("You have not specified any existent include paths", INCORRECT_CONFIG_CAT)
+        
+        targetPath = path.abspath(str(obj.get(TARGET_PATH)))
+
         if not targetPath or not path.exists(targetPath):
-            if defaultTargetPath:
-                targetPath = defaultTargetPath
-            else:
-                raiseError(f"Incorrect configuration. '{TARGET_PATH}' is {'incorrect' if targetPath else 'unspecified'} at the root level")
+            raiseError(f"'{TARGET_PATH}' is {'incorrect' if targetPath else 'unspecified'}", INCORRECT_CONFIG_CAT)
         
-        excludesList = obj.get(EXCLUDES)
-        if excludesList and len(excludesList):
-            excludes = [Exclude.fromObject(excludeObj, targetPath) for excludeObj in excludesList]
-            excludes = list(filter(None, excludes))
+        excludes = obj.get(EXCLUDES)
+        if excludes and len(excludes):
+            excludes = list(existentPaths(excludes))
         else:
             excludes = None
 
         return Include(paths, targetPath, excludes)
     
+    def accept(self, visitor : ConfigurationVisitor):
+        visitor.visitInclude(self)
+        if self.excludes:
+            for exclude in list(self.excludes):
+                visitor.visitExclude(exclude)
+    
     def __repr__(self) -> str:
         return str(self.__dict__)
 
-class Configuration:
+class Configuration(ConfigurationRule):
 
     includes : list[Include]
     
     def __init__(self, includes : list[Include]):
         self.includes = includes
+    
+    @staticmethod
+    def parseIncludes(obj : dict) -> list[Include] | None:
+        includesObj = obj.get(INCLUDES)
+        if includesObj and len(includesObj) > 0:
+            includes : list[Include] = list();
+            for includeObj in includesObj:
+                if includeObj:
+                    include = Include.fromObject(includeObj)
+                    if include:
+                        includes.append(include)
+            if (len(includes)):
+                return includes
+        return None
 
     @staticmethod
     def fromObj(obj : dict) -> Configuration:
-        includes = Exclude.parseIncludes(obj)
-        if includes:
+        includes = Configuration.parseIncludes(obj)
+        if includes or len(includes):
             return Configuration(includes)
-        raiseError("Incorrect configuration. No includes specified")
+        raiseError("No includes specified", INCORRECT_CONFIG_CAT)
 
     @staticmethod
     def fromString(contents : str) -> Configuration:
@@ -176,10 +195,14 @@ class Configuration:
     def fromFile(fi : TextIOWrapper) -> Configuration:
         return Configuration.fromString(fi.read())
 
+    def accept(self, visitor : ConfigurationVisitor):
+        visitor.visitConfiguration(self)
+        for include in self.includes:
+            include.accept(visitor)
+
     def __repr__(self) -> str:
-        #return f"Configuration:\n{self.includes}"
         return str(self.__dict__)
-        
+    
 
 configFileName = "config.json"
 configTemplate = """{
@@ -198,8 +221,51 @@ configTemplate = """{
     ]
 }"""
 
+""" Configuration Manipulations """
 
-""" Ensure Backuped   """
+class ConfigurationVisitor:
+    @abstractmethod
+    def visitConfiguration(self, config : Configuration) -> None:
+        pass
+    
+    @abstractmethod
+    def visitInclude(self, include : Include) -> None:
+        pass
+        # if include.excludes:
+        #     for exclude in self.excludes:
+        #         exclude.accept(self)
+    @abstractmethod
+    def visitExclude(self, exclude : str) -> None:
+        pass
+        # if exclude.includes and len(self.includes):
+        #     for include in self.includes:
+        #         include.accept(self)
+
+class ConfigurationValidationVisitor(ConfigurationVisitor):
+    parentInclude : Include
+
+    def __init__(self) -> None:
+        super().__init__()
+
+    def visitConfiguration(self, config : Configuration) -> None:
+        super().visitConfiguration(config)
+    
+    def visitInclude(self, include : Include) -> None:
+        self.parentInclude = include
+        super().visitInclude(include)
+    
+    def visitExclude(self, exclude : str) -> None:
+        isSub = False
+        for includePath in self.parentInclude.includePaths:
+            if exclude.startswith(includePath):
+                isSub = True
+        if not isSub:
+            raiseWarning(f'Exclude path "{exclude}" is not under any folder "{self.parentInclude.includePaths}"', INCORRECT_CONFIG_CAT)
+            self.parentInclude.excludes.remove(exclude)
+        super().visitExclude(exclude)
+
+
+""" Ensure Backuped """
 
 def ensureDataIsBackuped(config : Configuration):
     pass
@@ -239,6 +305,7 @@ def main():
     #print(f"Trying to add to registry key '{registryKeyName}' for '{path}'")
     tryAddToRegistry(path, APPLICATION_NAME)
     config = readConfig()
+    config.accept(ConfigurationValidationVisitor())
     printConfiguration(config)
     ensureDataIsBackuped(config)
     run()
