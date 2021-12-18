@@ -1,7 +1,7 @@
 
 from __future__ import annotations
 from abc import abstractmethod
-from typing import Iterator, List, Type
+from typing import Generic, Iterator, List, Type, TypeVar
 
 """ Registry Manipulations"""
 
@@ -42,13 +42,21 @@ ERROR = "Error"
 WARNING = "Warning"
 
 INCORRECT_CONFIG_CAT = "Incorrect configuration"
+COPY_FILES = "Unable to copy"
+FS_ERROR = "File system access error"
+
+log = open("events.log", "w")
 
 def raiseError(message : str, category : str):
-    print(f"{ERROR}: {category}. {message}")
+    msg = f"{ERROR}: {category}. {message}{os.linesep}"
+    print(msg, end='')
+    log.writelines(msg + '\n')
     raise Exception(message)
 
 def raiseWarning(message : str, category : str):
-    print(f"{WARNING}: {category}. {message}")
+    msg = f"{WARNING}: {category}. {message}{os.linesep}"
+    print(msg, end='')
+    log.writelines(msg)
 
 def pathIfExists(filePath : str) -> str | None:
     if filePath and path.exists(filePath):
@@ -146,7 +154,7 @@ class Include(ConfigurationRule):
         if excludes and len(excludes):
             excludes = list(existentPaths(excludes))
         else:
-            excludes = None
+            excludes = []
 
         return Include(paths, targetPath, excludes)
     
@@ -208,15 +216,13 @@ configFileName = "config.json"
 configTemplate = """{
     "includes" : [
         {
-            "paths" : [""],
+            "paths" : [""], 
             "targetPath" : "",
-            "excludes" : [
-                {
-                    "paths" : [""],
-                    "includes" : {
-                    }
-                }
-            ]
+            "excludes" : [""]
+        },
+        {
+            "paths" : [""],
+            "targetPath" : ""
         }
     ]
 }"""
@@ -231,15 +237,10 @@ class ConfigurationVisitor:
     @abstractmethod
     def visitInclude(self, include : Include) -> None:
         pass
-        # if include.excludes:
-        #     for exclude in self.excludes:
-        #         exclude.accept(self)
+
     @abstractmethod
     def visitExclude(self, exclude : str) -> None:
         pass
-        # if exclude.includes and len(self.includes):
-        #     for include in self.includes:
-        #         include.accept(self)
 
 class ConfigurationValidationVisitor(ConfigurationVisitor):
     parentInclude : Include
@@ -267,31 +268,61 @@ class ConfigurationValidationVisitor(ConfigurationVisitor):
 
 """ Ensure Backuped """
 
-def ensureDataIsBackuped(config : Configuration):
-    pass
+import shutil
 
+def tryCopy2(src, dst, excludes : list[str], follow_symlinks=True):
+    try:
+        # dontCopy = False
+        # for exclude in excludes:
+        #     if src.startswith(exclude):
+        #         dontCopy = True
+        #         break
+        # if not dontCopy:
+            shutil.copy2(src, dst)
+    except OSError as e:
+        raiseWarning(e, COPY_FILES)
+
+def ensureDataIsBackuped(config : Configuration):
+    for include in config.includes:
+        for sourcePath in include.includePaths:
+            try:
+                ignorePatterns = [
+                        exclude.removeprefix(includeSrc + os.sep)
+                        for exclude in include.excludes 
+                        for includeSrc in include.includePaths 
+                        if exclude.startswith(includeSrc)
+                    ]
+                shutil.copytree(
+                    sourcePath, include.targetPath, 
+                    dirs_exist_ok=True, 
+                    ignore=shutil.ignore_patterns(*ignorePatterns),
+                    copy_function=lambda src, dst: tryCopy2(src, dst, include.excludes)
+                    )
+            except OSError as osErr:
+                raiseError(str(osErr), FS_ERROR)
 
 """ 
         Main 
 """
 
-#import pprint
-
 TITLE = "FI-SUPPORTER version 0.1\n"
 
+def tryReadConfig() -> Configuration :
+    try:
+        if path.exists(configFileName):
+            with open(configFileName, 'r') as configFile:
+                return Configuration.fromFile(configFile)
+        else:
+            with open(configFileName, 'w') as configFile:
+                configFile.write(configTemplate)
+                raiseError("Created config. Modify the configuration file and restart the application after that")
+    except OSError as osErr:
+        raiseError(str(osErr), FS_ERROR)
 
-def readConfig() -> Configuration :
-    if path.exists(configFileName):
-        with open(configFileName, 'r') as configFile:
-            return Configuration.fromFile(configFile)
-    else:
-        with open(configFileName, 'w') as configFile:
-            configFile.write(configTemplate)
-            raiseError("Created config. Modify the configuration file and restart the application after that")
-
-def run():
+def runMonitor():
     input()
     input()
+
 
 def main():
     
@@ -304,11 +335,11 @@ def main():
     #registryKeyName = tail.split(".")[0]
     #print(f"Trying to add to registry key '{registryKeyName}' for '{path}'")
     tryAddToRegistry(path, APPLICATION_NAME)
-    config = readConfig()
+    config = tryReadConfig()
     config.accept(ConfigurationValidationVisitor())
     printConfiguration(config)
     ensureDataIsBackuped(config)
-    run()
+    runMonitor()
 
 if __name__ == "__main__":
     main()
