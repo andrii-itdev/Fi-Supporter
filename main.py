@@ -3,13 +3,15 @@ from __future__ import annotations
 from abc import abstractmethod
 from typing import Generic, Iterator, List, Type, TypeVar
 
+APPLICATION_NAME = "fi-supporter"
+APP_VERSION = "0.1"
+TITLE = APPLICATION_NAME.capitalize() + f" version {APP_VERSION}\n"
+
 """ Registry Manipulations"""
 
 from io import TextIOWrapper
 import winreg as reg
 import os
-
-APPLICATION_NAME = "fi-supporter"
 
 currentUserKey = reg.HKEY_CURRENT_USER
 allUsersKey = reg.HKEY_LOCAL_MACHINE
@@ -45,24 +47,33 @@ INCORRECT_CONFIG_CAT = "Incorrect configuration"
 COPY_FILES = "Unable to copy"
 FS_ERROR = "File system access error"
 
-log = open("events.log", "w")
+logFile : TextIOWrapper
+
+def log(msg : str):
+    if not msg.endswith(os.linesep):
+        msg += os.linesep
+    logFile.writelines(msg)
+
+def notifyMessage(message : str, end=os.linesep):
+    print(message, end=end)
+    log(message)
+
+def notify(message : str, category : str, type : str):
+    msg = f"{type}: {category}. {message}{os.linesep}"
+    notifyMessage(msg, end='')
 
 def raiseError(message : str, category : str):
-    msg = f"{ERROR}: {category}. {message}{os.linesep}"
-    print(msg, end='')
-    log.writelines(msg + '\n')
+    notify(message, category, ERROR)
     raise Exception(message)
 
 def raiseWarning(message : str, category : str):
-    msg = f"{WARNING}: {category}. {message}{os.linesep}"
-    print(msg, end='')
-    log.writelines(msg)
+    notify(message, category, WARNING)
 
 def pathIfExists(filePath : str) -> str | None:
     if filePath and path.exists(filePath):
         return filePath
     else:
-        raiseWarning(f"Can't find the path '{filePath}'")
+        raiseWarning(f"Can't find the path '{filePath}'", INCORRECT_CONFIG_CAT)
         return None
 
 def existentPaths(paths : Iterator[str]) -> Iterator[str]:
@@ -147,8 +158,11 @@ class Include(ConfigurationRule):
         
         targetPath = path.abspath(str(obj.get(TARGET_PATH)))
 
-        if not targetPath or not path.exists(targetPath):
-            raiseError(f"'{TARGET_PATH}' is {'incorrect' if targetPath else 'unspecified'}", INCORRECT_CONFIG_CAT)
+        if not targetPath:
+            raiseError(f"'{TARGET_PATH}' is unspecified", INCORRECT_CONFIG_CAT)
+
+        if not path.exists(targetPath):
+            raiseWarning(f"'{TARGET_PATH}' does not exist, therefore this rule is ignored. Once this target path '{targetPath}' appears in file system the corresponding rule will be activated.", INCORRECT_CONFIG_CAT)
         
         excludes = obj.get(EXCLUDES)
         if excludes and len(excludes):
@@ -227,6 +241,19 @@ configTemplate = """{
     ]
 }"""
 
+def tryReadConfig() -> Configuration :
+    try:
+        if path.exists(configFileName):
+            with open(configFileName, 'r') as configFile:
+                return Configuration.fromFile(configFile)
+        else:
+            with open(configFileName, 'w') as configFile:
+                configFile.write(configTemplate)
+                raiseError("Created config. Modify the configuration file and restart the application after that")
+    except OSError as osErr:
+        raiseError(str(osErr), FS_ERROR)
+
+
 """ Configuration Manipulations """
 
 class ConfigurationVisitor:
@@ -261,85 +288,177 @@ class ConfigurationValidationVisitor(ConfigurationVisitor):
             if exclude.startswith(includePath):
                 isSub = True
         if not isSub:
-            raiseWarning(f'Exclude path "{exclude}" is not under any folder "{self.parentInclude.includePaths}"', INCORRECT_CONFIG_CAT)
+            raiseWarning(f'Exclude path "{exclude}" is not a subfolder of any "{self.parentInclude.includePaths}"', INCORRECT_CONFIG_CAT)
             self.parentInclude.excludes.remove(exclude)
         super().visitExclude(exclude)
 
+""" Setup file system monitoring """
+
+from watchdog.observers import Observer
+from watchdog.events import FileSystemEvent, FileSystemEventHandler, FileSystemMovedEvent, PatternMatchingEventHandler
+from watchdog.utils import patterns
+
+class Watcher:
+    sourcePath : str
+    targetPath : str
+    observer : Observer
+    handler : FileSystemEventHandler
+
+    def __init__(self, src : str, target : str) -> None:
+        self.sourcePath = src
+        self.targetPath = target
+        self.observer = Observer()
+    
+    def configureObserver(self, ignorePatterns : any = []):
+        self.ignorePaths = ignorePatterns
+        self.handler = PatternMatchingEventHandler(
+            "*", ignorePatterns, ignore_directories=False, case_sensitive=True)
+        self.handler.on_created = self.on_created
+        self.handler.on_deleted = self.on_deleted
+        self.handler.on_modified = self.on_modified
+        self.handler.on_moved = self.on_moved
+    
+    def run(self):
+        if self.handler == None:
+            self.configureObserver()
+        self.observer.schedule(self.handler, self.sourcePath, recursive=True)
+        self.observer.start()
+
+    def stop(self):
+        self.observer.stop()
+        self.observer.join()
+
+    def shouldIgnore(self, path : str) -> bool:
+        for ignorePath in self.ignorePaths: 
+            if path.startswith(os.path.join(self.sourcePath, ignorePath)):
+                return True
+        return False
+    
+    def on_created(self, event : FileSystemEvent):
+        if self.shouldIgnore(event.src_path):
+            return
+        print(f"{event.src_path} has been created!")
+
+    def on_deleted(self, event : FileSystemEvent):
+        if self.shouldIgnore(event.src_path):
+            return
+        print(f"{event.src_path} has been deleted!")
+
+    def on_modified(self, event : FileSystemEvent):
+        if self.shouldIgnore(event.src_path):
+            return
+        print(f"{event.src_path} has been modified!")
+
+    def on_moved(self, event : FileSystemMovedEvent):
+        if self.shouldIgnore(event.src_path):
+            return
+        print(f"{event.src_path} has been moved to {event.dest_path}!")
+
+def runMonitor(observers : list[Watcher] = None):
+    notifyMessage("Running Monitor...")
+
+    for o in observers:
+        o.run()
+        print(f"Monitoring {o.sourcePath}");
+    try:
+        input()
+    except KeyboardInterrupt:
+        print(APPLICATION_NAME + " monitoring is interrupted")
 
 """ Ensure Backuped """
 
 import shutil
+import filecmp
 
 def tryCopy2(src, dst, excludes : list[str], follow_symlinks=True):
     try:
-        # dontCopy = False
-        # for exclude in excludes:
-        #     if src.startswith(exclude):
-        #         dontCopy = True
-        #         break
-        # if not dontCopy:
-            shutil.copy2(src, dst)
+        if path.exists(dst):
+            if filecmp.cmp(src, dst):
+                return
+            else:
+                os.remove(dst)
+        shutil.copy2(src, dst)
+        notifyMessage(f"Copied '{src}' to '{dst}'")
+
     except OSError as e:
         raiseWarning(e, COPY_FILES)
 
-def ensureDataIsBackuped(config : Configuration):
-    for include in config.includes:
-        for sourcePath in include.includePaths:
-            try:
-                ignorePatterns = [
-                        exclude.removeprefix(includeSrc + os.sep)
-                        for exclude in include.excludes 
-                        for includeSrc in include.includePaths 
-                        if exclude.startswith(includeSrc)
-                    ]
-                shutil.copytree(
-                    sourcePath, include.targetPath, 
+def arrangeIgnorePatterns(include : Include) -> list[str]:
+    # patterns = []
+    # for exclude in include.excludes:
+    #     for includeSrc in include.includePaths:
+    #         if exclude.startswith(includeSrc):
+    #             excludePathTail = exclude.removeprefix(includeSrc + os.sep)
+    #             patterns.append(
+    #                 excludePathTail #if os.path.isfile(includeSrc) else os.path.join(excludePathTail, '*.*')
+    #                 )
+    # return patterns
+    return [
+            exclude.removeprefix(includeSrc + os.sep)
+            for exclude in include.excludes 
+            for includeSrc in include.includePaths 
+            if exclude.startswith(includeSrc)
+        ]
+
+def backupSinglePath(observers, include, ignorePatterns, sourcePath):
+    try:
+        ignore = shutil.ignore_patterns(*ignorePatterns)
+        _, sourceFolderName = path.split(sourcePath)
+        targetPath = path.join(include.targetPath, sourceFolderName)
+        shutil.copytree(
+                    sourcePath, targetPath, 
                     dirs_exist_ok=True, 
-                    ignore=shutil.ignore_patterns(*ignorePatterns),
+                    ignore=ignore,
                     copy_function=lambda src, dst: tryCopy2(src, dst, include.excludes)
                     )
-            except OSError as osErr:
-                raiseError(str(osErr), FS_ERROR)
+        if observers != None:
+            o = Watcher(sourcePath, targetPath)
+            o.configureObserver(ignorePatterns)
+            observers.append(o)
+    except OSError as osErr:
+        raiseError(str(osErr), FS_ERROR)
+
+
+def ensureDataIsBackuped(config : Configuration, observers : list[Watcher] = None):
+    """If observers is None, don't monitor the file system"""
+
+    for include in config.includes:
+        ignorePatterns = arrangeIgnorePatterns(include)
+        for sourcePath in include.includePaths:
+            backupSinglePath(observers, include, ignorePatterns, sourcePath)
 
 """ 
         Main 
 """
-
-TITLE = "FI-SUPPORTER version 0.1\n"
-
-def tryReadConfig() -> Configuration :
-    try:
-        if path.exists(configFileName):
-            with open(configFileName, 'r') as configFile:
-                return Configuration.fromFile(configFile)
-        else:
-            with open(configFileName, 'w') as configFile:
-                configFile.write(configTemplate)
-                raiseError("Created config. Modify the configuration file and restart the application after that")
-    except OSError as osErr:
-        raiseError(str(osErr), FS_ERROR)
-
-def runMonitor():
-    input()
-    input()
-
-
 def main():
-    
     print(TITLE)
-    # currentPath = os.path.dirname()
-    # address = os.join(currentPath, fileName)
-    path = os.path.realpath(__file__)
-    command = "python " + path
-    #_, tail = os.path.split(path)
-    #registryKeyName = tail.split(".")[0]
-    #print(f"Trying to add to registry key '{registryKeyName}' for '{path}'")
-    tryAddToRegistry(path, APPLICATION_NAME)
-    config = tryReadConfig()
-    config.accept(ConfigurationValidationVisitor())
-    printConfiguration(config)
-    ensureDataIsBackuped(config)
-    runMonitor()
+
+    try:
+        # currentPath = os.path.dirname()
+        # address = os.join(currentPath, fileName)
+        global logFile
+        logFile = open("events.log", "w")
+        path = os.path.realpath(__file__)
+        log('Started from: ' + path)
+
+        #command = "python " + path
+        #_, tail = os.path.split(path)
+        #registryKeyName = tail.split(".")[0]
+        #print(f"Trying to add to registry key '{registryKeyName}' for '{path}'")
+
+        tryAddToRegistry(path, APPLICATION_NAME)
+        config = tryReadConfig()
+        config.accept(ConfigurationValidationVisitor())
+        printConfiguration(config)
+        observers = []
+        ensureDataIsBackuped(config, observers)
+        runMonitor(observers)
+
+    except Exception as anyError:
+        print(anyError)
+        input()
+    finally:
+        logFile.close()
 
 if __name__ == "__main__":
     main()
