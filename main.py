@@ -44,7 +44,7 @@ import json
 ERROR = "Error"
 WARNING = "Warning"
 
-INCORRECT_CONFIG_CAT = "Incorrect configuration"
+INVALID_CONFIG_CAT = "Invalid configuration"
 COPY_FILES_CAT = "Unable to copy"
 FS_ERROR_CAT = "File system access"
 MONITOR_CAT = "Monitor changes reflection"
@@ -56,7 +56,8 @@ def log(msg : str):
         msg += os.linesep
     logFile.writelines(msg)
 
-def notifyMessage(message : str, end=os.linesep):
+def notifyMessage(message : str | Exception, end=os.linesep):
+    message = str(message)
     print(message, end=end)
     log(message)
 
@@ -75,10 +76,10 @@ def pathIfExists(filePath : str) -> str | None:
     if filePath and path.exists(filePath):
         return filePath
     else:
-        raiseWarning(f"Can't find the path '{filePath}'", INCORRECT_CONFIG_CAT)
+        raiseWarning(f"Can't find the path '{filePath}'", INVALID_CONFIG_CAT)
         return None
 
-def existentPaths(paths : Iterator[str]) -> Iterator[str]:
+def existentPaths(paths : list[str]) -> Iterator[str]:
     for p in paths:
         existentPath = pathIfExists(p)
         if existentPath:
@@ -150,19 +151,19 @@ class Include(ConfigurationRule):
 
     @staticmethod
     def fromObject(obj : dict) -> Include:
-        paths = list(obj.get(PATHS))
+        paths : list[str] = list(obj.get(PATHS) as Iterator[str])
         if not paths or not len(paths):
-            raiseError("You have not specified any include paths")
+            raiseError("You have not specified any include paths", INVALID_CONFIG_CAT)
         
         paths = list(existentPaths(paths))
 
         if not len(paths):
-            raiseError("You have not specified any existent include paths", INCORRECT_CONFIG_CAT)
+            raiseError("You have not specified any existent include paths", INVALID_CONFIG_CAT)
         
         targetPath = path.abspath(str(obj.get(TARGET_PATH)))
 
         if not targetPath:
-            raiseError(f"'{TARGET_PATH}' is unspecified", INCORRECT_CONFIG_CAT)
+            raiseError(f"'{TARGET_PATH}' is unspecified", INVALID_CONFIG_CAT)
 
         # isActive = True
         # if not path.exists(targetPath):
@@ -210,9 +211,9 @@ class Configuration(ConfigurationRule):
     @staticmethod
     def fromObj(obj : dict) -> Configuration:
         includes = Configuration.parseIncludes(obj)
-        if includes or len(includes):
+        if includes and len(includes):
             return Configuration(includes)
-        raiseError("No includes specified", INCORRECT_CONFIG_CAT)
+        raiseError("No includes specified", INVALID_CONFIG_CAT)
 
     @staticmethod
     def fromString(contents : str) -> Configuration:
@@ -254,7 +255,7 @@ def tryReadConfig() -> Configuration :
         else:
             with open(configFileName, 'w') as configFile:
                 configFile.write(configTemplate)
-                raiseError("Created config. Modify the configuration file and restart the application after that")
+                raiseError("Created config. Modify the configuration file and restart the application after that", INVALID_CONFIG_CAT)
     except OSError as osErr:
         raiseError(str(osErr), FS_ERROR_CAT)
 
@@ -294,7 +295,7 @@ class ConfigurationValidationVisitor(ConfigurationVisitor):
             if exclude.startswith(includePath):
                 isSub = True
         if not isSub:
-            raiseWarning(f'Exclude path "{exclude}" is not a subfolder of any "{self.parentInclude.includePaths}"', INCORRECT_CONFIG_CAT)
+            raiseWarning(f'Exclude path "{exclude}" is not a subfolder of any "{self.parentInclude.includePaths}"', INVALID_CONFIG_CAT)
             self.parentInclude.excludes.remove(exclude)
         super().visitExclude(exclude)
 
@@ -342,7 +343,7 @@ class Watcher:
         self.targetPath = target
         self.observer = Observer()
     
-    def configureObserver(self, ignorePatterns : any = []):
+    def configureObserver(self, ignorePatterns : Any = []):
         self.ignorePaths = ignorePatterns
         self.handler = PatternMatchingEventHandler(
             "*", ignorePatterns, ignore_directories=False, case_sensitive=True)
@@ -429,9 +430,10 @@ class Watcher:
             notifyEvent(str(osErr), MONITOR_CAT, ERROR)
 
 def observeFileSystem(observers : list[Watcher] = None):
-    for o in observers:
-        o.run()
-        print(f"Monitoring '{o.sourcePath}'")
+    if observers:
+        for o in observers:
+            o.run()
+            print(f"Monitoring '{o.sourcePath}'")
 
 """ Ensure Backuped """
 
@@ -445,7 +447,7 @@ def tryCopy2(src, dst, excludes : list[str], follow_symlinks=True):
         CopyMethod(src, dst)
         notifyMessage(f"Copied '{src}' to '{dst}'")
     except OSError as e:
-        raiseWarning(e, COPY_FILES_CAT)
+        raiseWarning(str(e), COPY_FILES_CAT)
 
 def arrangeIgnorePatterns(include : Include) -> list[str]:
     return [
@@ -455,7 +457,7 @@ def arrangeIgnorePatterns(include : Include) -> list[str]:
             if exclude.startswith(includeSrc)
         ]
 
-def backupSinglePath(observers : list[Watcher], include : Include, ignorePatterns : list[str], sourcePath : str):
+def backupSinglePath(observers : list[Watcher] | None, include : Include, ignorePatterns : list[str], sourcePath : str):
     try:
         ignore = shutil.ignore_patterns(*ignorePatterns)
         sourceFolderName = os.path.basename(sourcePath)
@@ -530,9 +532,9 @@ class DeviceListener:
         0xFFFF: ('DBT_USERDEFINED', 'The meaning of this message is user-defined.'),
     }
 
-    onDrivesChangedHandler : Callable[[list[Drive]]]
+    onDrivesChangedHandler : Callable[[], None]
 
-    def __init__(self, drivesChangedCallback : Callable[[list[Drive]]]) -> None:
+    def __init__(self, drivesChangedCallback : Callable[[], None]) -> None:
         self.onDrivesChangedHandler = drivesChangedCallback
 
     def _on_message(self, hwnd : int, msg : int, wparam : int, lparam : int):
@@ -547,8 +549,8 @@ class DeviceListener:
         wc = win32gui.WNDCLASS()
         wc.lpfnWndProc = self._on_message
         wc.lpszClassName = self.__class__.__name__
-        wc.hInstance = win32api.GetModuleHandle(None)
-        class_atom = win32gui.RegisterClass(wc)
+        wc.hInstance = win32api.GetModuleHandle()
+        class_atom = win32gui.RegisterClass()
         return win32gui.CreateWindow(class_atom, self.__class__.__name__, 0, 0, 0, 0, 0, 0, 0, wc.hInstance, None)
 
     def run(self):
@@ -559,10 +561,10 @@ class DevicesWatcher:
 
     _deviceListener : DeviceListener
     _configuration : Configuration
-    _onActivate : Callable[[list[Include]]]
-    _onDeactivate : Callable[[list[Include]]]
+    _onActivate : Callable[[list[Include]], None]
+    _onDeactivate : Callable[[list[Include]], None]
 
-    def __init__(self, config : Configuration, activation : Callable[[list[Include]]], deactivate : Callable[[list[Include]]]) -> None:
+    def __init__(self, config : Configuration, activation : Callable[[list[Include]], None], deactivate : Callable[[list[Include]], None]) -> None:
         self._configuration = config
         self._onActivate = activation
         self._onDeactivate = deactivate
@@ -584,7 +586,7 @@ class DevicesWatcher:
         #print(f"Drives updated:\n{list[drivesIntersection]}")
 
     @staticmethod
-    def listDrives() -> list[tuple[str,str,str]]:
+    def listDrives() -> list[Drive] | None:
         proc = subprocess.run(args=[
                 'powershell',
                 '-noprofile',
