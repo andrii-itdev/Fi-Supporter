@@ -342,7 +342,15 @@ from watchdog.observers import Observer
 from watchdog.events import FileSystemEvent, FileSystemEventHandler, FileSystemMovedEvent, PatternMatchingEventHandler
 from watchdog.utils import patterns
 
-CopyMethod = shutil.copy2
+def ensureParentFolderExists(dst : str):
+    folder, _ = os.path.split(dst)
+    if not os.path.exists(folder):
+        ensureParentFolderExists(folder)
+        os.mkdir(folder)
+
+def CopyMethod(src, dst):
+    ensureParentFolderExists(dst)
+    return shutil.copy2(src, dst)
 
 class Watcher:
     sourcePath : str
@@ -418,7 +426,7 @@ class Watcher:
             if os.path.isfile(destination):
                 os.remove(destination)
             else:
-                os.removedirs(destination)
+                shutil.rmtree(destination)
             notifyMessage(f"{destination} has been deleted!")
         except OSError as osErr:
             notifyEvent(str(osErr), MONITOR_CAT, ERROR)
