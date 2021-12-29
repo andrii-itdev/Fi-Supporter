@@ -1,7 +1,10 @@
 
 from __future__ import annotations
 from abc import abstractmethod
-from typing import Any, AnyStr, Callable, Generic, Iterator, List, Set, Tuple, Type, TypeVar
+from multiprocessing.context import Process
+from platform import system
+import threading
+from typing import Any, AnyStr, Callable, Generic, Iterator, List, Set, Tuple, Type, TypeVar, overload
 from dataclasses import dataclass
 
 APPLICATION_NAME = "fi-supporter"
@@ -48,7 +51,9 @@ INVALID_CONFIG_CAT = "Invalid configuration"
 COPY_FILES_CAT = "Unable to copy"
 FS_ERROR_CAT = "File system access"
 MONITOR_CAT = "Monitor changes reflection"
-DEVICE_MONITORING = "Device monitoring"
+DEVICE_MONITORING_CAT = "Device monitoring"
+
+NO_INCLUDE_PATHS_ERROR = "You have not specified any valid include paths"
 
 logFile : TextIOWrapper
 
@@ -140,12 +145,13 @@ class ConfigurationRule:
 #         return str(self.__dict__)
 
 class Include(ConfigurationRule):
-    isActive : bool = True
+    isActive : bool
     includePaths : list[str]
     targetPath : str
     excludes : list[str]
 
     def __init__(self, includes : list[str], targetPath : str, excludes : list[str]) -> None:
+        self.isActive = True
         self.includePaths = includes
         self.targetPath = targetPath
         self.excludes = excludes
@@ -155,12 +161,12 @@ class Include(ConfigurationRule):
         pathsObj : list[str] = obj.get(PATHS) 
         paths : list[str] = list(pathsObj)
         if not paths or not len(paths):
-            raiseError("You have not specified any include paths", INVALID_CONFIG_CAT)
+            raiseError(NO_INCLUDE_PATHS_ERROR, INVALID_CONFIG_CAT)
         
         paths = list(existentPaths(paths))
 
         if not len(paths):
-            raiseError("You have not specified any existent include paths", INVALID_CONFIG_CAT)
+            raiseError(NO_INCLUDE_PATHS_ERROR, INVALID_CONFIG_CAT)
         
         targetPath = path.abspath(str(obj.get(TARGET_PATH)))
 
@@ -250,13 +256,15 @@ configTemplate = """{
     ]
 }"""
 
-def tryReadConfig() -> Configuration :
+def tryReadConfig(appFolder : str) -> Configuration :
     try:
-        if path.exists(configFileName):
-            with open(configFileName, 'r') as configFile:
+        configFile = os.path.join(appFolder, configFileName)
+        print("Configuration path: ", configFile)
+        if path.exists(configFile):
+            with open(configFile, 'r') as configFile:
                 return Configuration.fromFile(configFile)
         else:
-            with open(configFileName, 'w') as configFile:
+            with open(configFile, 'w') as configFile:
                 configFile.write(configTemplate)
                 raiseError("Created config. Modify the configuration file and restart the application after that", INVALID_CONFIG_CAT)
     except OSError as osErr:
@@ -330,11 +338,11 @@ class ConfigurationUpdateActiveDrivesVisitor(ConfigurationVisitor):
 import shutil
 import filecmp
 
-CopyMethod = shutil.copy2
-
 from watchdog.observers import Observer
 from watchdog.events import FileSystemEvent, FileSystemEventHandler, FileSystemMovedEvent, PatternMatchingEventHandler
 from watchdog.utils import patterns
+
+CopyMethod = shutil.copy2
 
 class Watcher:
     sourcePath : str
@@ -385,11 +393,10 @@ class Watcher:
     def destinationPath(self, fromPath : str):
         tailSubpath = fromPath.removeprefix(self.sourcePath).removeprefix(os.sep)
         return path.join(self.targetPath, tailSubpath)
-
+    
     def copyItem(self, srcPath : str) -> str:
         destination = self.destinationPath(srcPath)
-        return shutil.copy2(srcPath, destination)
-        #return CopyMethod(srcPath, destination)
+        return CopyMethod(srcPath, destination)
     
     def on_created(self, event : FileSystemEvent):
         srcPath = str(event.src_path)
@@ -422,8 +429,10 @@ class Watcher:
             return
         try:
             if os.path.isfile(srcPath):
-                destination = self.copyItem(srcPath)
-                notifyMessage(f"{destination} has been replaced!")
+                dst = self.destinationPath(srcPath)
+                if not os.path.exists(dst) or not filecmp.cmp(srcPath, dst):
+                    destination = CopyMethod(srcPath, dst)
+                    notifyMessage(f"{destination} has been replaced!")
         except OSError as osErr:
             notifyEvent(str(osErr), MONITOR_CAT, ERROR)
 
@@ -435,8 +444,9 @@ class Watcher:
         destPath = str(event.dest_path)
         targetDestPath = self.destinationPath(destPath)
         try:
-            os.rename(targetSourcePath, targetDestPath)
-            notifyMessage(f"{srcPath} has been moved to {event.dest_path}!")
+            if path.exists(targetSourcePath):
+                os.rename(targetSourcePath, targetDestPath)
+                notifyMessage(f"{srcPath} has been moved to {event.dest_path}!")
         except OSError as osErr:
             notifyEvent(str(osErr), MONITOR_CAT, ERROR)
 
@@ -498,7 +508,9 @@ def ensureDataIsBackuped(includes: list[Include], observers : list[Watcher] = No
 
 """ Device Monitoring """
 
+import atexit
 import subprocess
+from threading import Thread
 
 try:
     import win32api, win32con, win32gui
@@ -640,14 +652,20 @@ def deactivateRules(deactivatedIncludes : list[Include], watchers : list[Watcher
                 watcher.stop()
                 watchers.remove(watcher)
 
-def runDeviceWatcher(config, watchers):
+def runDeviceWatcher(config, watchers) -> Thread | None:
     try:
         devicesWatcher = DevicesWatcher(config, 
                         lambda rules: activateRules(rules, watchers), 
                         lambda rules: deactivateRules(rules, watchers))
-        devicesWatcher.run()
+        
+        devWatcher = threading.Thread(target=devicesWatcher.run, name="Device-Watcher")
+        devWatcher.daemon = True
+        devWatcher.start()
+        return devWatcher
+        
     except Exception as ex:
-        notifyMessage(str(ex), DEVICE_MONITORING)
+        notifyMessage(str(ex), DEVICE_MONITORING_CAT)
+        return None
 
 
 def main():
@@ -667,7 +685,8 @@ def main():
         #print(f"Trying to add to registry key '{registryKeyName}' for '{path}'")
 
         tryAddToRegistry(path, APPLICATION_NAME)
-        config = tryReadConfig()
+        currentFolder, _ = os.path.split(__file__)
+        config = tryReadConfig(currentFolder)
         config.accept(ConfigurationValidationVisitor())
         activeDrivesVisitor = ConfigurationUpdateActiveDrivesVisitor()
         config.accept(activeDrivesVisitor)
@@ -690,9 +709,8 @@ def main():
         notifyMessage(anyError)
         input()
 
-import atexit
-
 def onExitHandler():
+    print('<exited>')
     logFile.close()
 
 if __name__ == "__main__":
