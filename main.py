@@ -16,7 +16,7 @@ import os
 
 currentUserKey = reg.HKEY_CURRENT_USER
 allUsersKey = reg.HKEY_LOCAL_MACHINE
-keyValue = "Software\Microsoft\Windows\CurrentVersion\Run"
+keyValue = "Software\\Microsoft\\Windows\\CurrentVersion\\Run"
 
 
 def setRegistryKey(path, regKeyName, open):
@@ -48,6 +48,7 @@ INVALID_CONFIG_CAT = "Invalid configuration"
 COPY_FILES_CAT = "Unable to copy"
 FS_ERROR_CAT = "File system access"
 MONITOR_CAT = "Monitor changes reflection"
+DEVICE_MONITORING = "Device monitoring"
 
 logFile : TextIOWrapper
 
@@ -151,7 +152,8 @@ class Include(ConfigurationRule):
 
     @staticmethod
     def fromObject(obj : dict) -> Include:
-        paths : list[str] = list(obj.get(PATHS) as Iterator[str])
+        pathsObj : list[str] = obj.get(PATHS) 
+        paths : list[str] = list(pathsObj)
         if not paths or not len(paths):
             raiseError("You have not specified any include paths", INVALID_CONFIG_CAT)
         
@@ -197,7 +199,7 @@ class Configuration(ConfigurationRule):
     @staticmethod
     def parseIncludes(obj : dict) -> list[Include] | None:
         includesObj = obj.get(INCLUDES)
-        if includesObj and len(includesObj) > 0:
+        if includesObj and len(includesObj):
             includes : list[Include] = list();
             for includeObj in includesObj:
                 if includeObj:
@@ -213,7 +215,8 @@ class Configuration(ConfigurationRule):
         includes = Configuration.parseIncludes(obj)
         if includes and len(includes):
             return Configuration(includes)
-        raiseError("No includes specified", INVALID_CONFIG_CAT)
+        else:
+            raiseError("No includes specified", INVALID_CONFIG_CAT)
 
     @staticmethod
     def fromString(contents : str) -> Configuration:
@@ -301,10 +304,12 @@ class ConfigurationValidationVisitor(ConfigurationVisitor):
 
 class ConfigurationUpdateActiveDrivesVisitor(ConfigurationVisitor):
 
-    activatedRules : list[Include] = []
-    deactivatedRules : list[Include] = []
+    activatedRules : list[Include]
+    deactivatedRules : list[Include]
 
     def __init__(self) -> None:
+        self.activatedRules = []
+        self.deactivatedRules = []
         super().__init__()
 
     def visitInclude(self, include: Include) -> None:
@@ -333,14 +338,16 @@ from watchdog.utils import patterns
 
 class Watcher:
     sourcePath : str
-    targetPath : str
+    baseTargetPath : str
+    sourceFolderName : str
     ignorePaths : list[str]
     observer : Observer
     handler : FileSystemEventHandler
 
-    def __init__(self, src : str, target : str) -> None:
+    def __init__(self, src : str, baseTargetPath : str, sourceFolderName : str) -> None:
         self.sourcePath = src
-        self.targetPath = target
+        self.baseTargetPath = baseTargetPath
+        self.sourceFolderName = sourceFolderName
         self.observer = Observer()
     
     def configureObserver(self, ignorePatterns : Any = []):
@@ -370,6 +377,10 @@ class Watcher:
             if path.startswith(os.path.join(self.sourcePath, ignorePath)):
                 return True
         return False
+
+    @property
+    def targetPath(self):
+        return os.path.join(self.baseTargetPath, self.sourceFolderName)
 
     def destinationPath(self, fromPath : str):
         tailSubpath = fromPath.removeprefix(self.sourcePath).removeprefix(os.sep)
@@ -469,7 +480,7 @@ def backupSinglePath(observers : list[Watcher] | None, include : Include, ignore
                     copy_function=lambda src, dst: tryCopy2(src, dst, include.excludes)
                     )
         if observers != None:
-            o = Watcher(sourcePath, targetPath)
+            o = Watcher(sourcePath, include.targetPath, sourceFolderName)
             o.configureObserver(ignorePatterns)
             observers.append(o)
     except OSError as osErr:
@@ -550,7 +561,7 @@ class DeviceListener:
         wc.lpfnWndProc = self._on_message
         wc.lpszClassName = self.__class__.__name__
         wc.hInstance = win32api.GetModuleHandle()
-        class_atom = win32gui.RegisterClass()
+        class_atom = win32gui.RegisterClass(wc)
         return win32gui.CreateWindow(class_atom, self.__class__.__name__, 0, 0, 0, 0, 0, 0, 0, wc.hInstance, None)
 
     def run(self):
@@ -576,9 +587,9 @@ class DevicesWatcher:
     def devicesChanged(self):
         activeDrivesVisitor = ConfigurationUpdateActiveDrivesVisitor()
         self._configuration.accept(activeDrivesVisitor)
-        if self._onActivate and len(activeDrivesVisitor.activatedRules) > 0:
+        if self._onActivate and len(activeDrivesVisitor.activatedRules):
             self._onActivate(activeDrivesVisitor.activatedRules)
-        if self._onDeactivate and len(activeDrivesVisitor.deactivatedRules) > 0:
+        if self._onDeactivate and len(activeDrivesVisitor.deactivatedRules):
             self._onDeactivate(activeDrivesVisitor.deactivatedRules)
 
         #availableDrives = DevicesWatcher.listDrives()
@@ -615,19 +626,28 @@ def activateRules(includes : list[Include], watchers : list[Watcher]):
     if len(addedObservers) > 0:
         observeFileSystem(addedObservers)
         watchers.extend(addedObservers)
-        observeFileSystem(addedObservers)
 
 
-def deactivateRules(includes : list[Include], watchers : list[Watcher]):
+def deactivateRules(deactivatedIncludes : list[Include], watchers : list[Watcher]):
     """New includes that were deactivated; working observers"""
-    if includes == None or len(includes) == 0:
+    if deactivatedIncludes == None or len(deactivatedIncludes) == 0:
         return
     
-    for watcher in watchers:
-        for include in includes:
-            if watcher.targetPath == include.targetPath and watcher.sourcePath in include.includePaths:
+    watchersClone = watchers[:]
+    for include in deactivatedIncludes:
+        for watcher in watchersClone:
+            if watcher.baseTargetPath == include.targetPath and watcher.sourcePath in include.includePaths:
                 watcher.stop()
                 watchers.remove(watcher)
+
+def runDeviceWatcher(config, watchers):
+    try:
+        devicesWatcher = DevicesWatcher(config, 
+                        lambda rules: activateRules(rules, watchers), 
+                        lambda rules: deactivateRules(rules, watchers))
+        devicesWatcher.run()
+    except Exception as ex:
+        notifyMessage(str(ex), DEVICE_MONITORING)
 
 
 def main():
@@ -658,10 +678,7 @@ def main():
         notifyMessage("Running Monitor...")
         observeFileSystem(watchers)
 
-        devicesWatcher = DevicesWatcher(config, 
-                    lambda rules: activateRules(rules, watchers), 
-                    lambda rules: deactivateRules(rules, watchers))
-        devicesWatcher.run()
+        runDeviceWatcher(config, watchers)
 
         try:
             while True:
