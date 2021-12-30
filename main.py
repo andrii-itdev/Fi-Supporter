@@ -4,7 +4,7 @@ from abc import abstractmethod
 from multiprocessing.context import Process
 from platform import system
 import threading
-from typing import Any, AnyStr, Callable, Generic, Iterator, List, Set, Tuple, Type, TypeVar, overload
+from typing import Any, AnyStr, Callable, Deque, Generic, Iterator, List, Set, Tuple, Type, TypeVar, overload
 from dataclasses import dataclass
 
 APPLICATION_NAME = "fi-supporter"
@@ -51,6 +51,7 @@ INVALID_CONFIG_CAT = "Invalid configuration"
 COPY_FILES_CAT = "Unable to copy"
 FS_ERROR_CAT = "File system access"
 MONITOR_CAT = "Monitor changes reflection"
+ATTEMPT_OPERATION_CAT = "Attempt execute operation"
 DEVICE_MONITORING_CAT = "Device monitoring"
 
 NO_INCLUDE_PATHS_ERROR = "You have not specified any valid include paths"
@@ -333,6 +334,98 @@ class ConfigurationUpdateActiveDrivesVisitor(ConfigurationVisitor):
                 notifyMessage(f"Rule for target path: '{include.targetPath}' is deactivated because the drive '{drive}' does not exists. Once the device is plugged in, the corresponding rule will be activated.")
         return super().visitInclude(include)
 
+""" Periodical attempts to execute unsuccessful synchronizions """
+
+import datetime
+from threading import Timer
+
+# class classproperty(property):
+#     def __get__(self, __cls: Any, __owner) -> Any:
+#         if self.fget == None:
+#             return None
+#         else:
+#             return classmethod(self.fget).__get__(None, __owner)()
+
+class AttemptOperation:
+    operation : Callable[[], None]
+
+    def __init__(self, operation : Callable[[], None]) -> None:
+        self.operation = operation
+
+    def tryExecute(self) -> bool:
+        try:
+            self.operation()
+            return True
+        except Exception as ex:
+            notifyEvent(str(ex), ATTEMPT_OPERATION_CAT, ERROR)
+            return False
+
+class AttemptsManager:
+    _timer : Timer | None;
+    _period : float
+    _operations : list[AttemptOperation]
+    _hasStarted : bool
+
+    def __init__(self, time_delta : datetime.timedelta = datetime.timedelta(minutes=1)) -> None:
+        self._period = time_delta.seconds
+        self._operations = []
+        self._hasStarted = False
+        self._timer = None
+        self.reset_timer()
+
+    def reset_timer(self) -> Timer:
+        if self._timer == None:
+            self._timer = Timer(self._period, self.inquire)
+        self._timer.name = self.__class__.__name__
+        self._timer.daemon = True
+        return self._timer
+
+    def QueueOperation(self, operation : AttemptOperation):
+        if self._hasStarted:
+            self.stop()
+            self._operations.append(operation)
+            self.start()
+        else:
+            self._operations.append(operation)
+    
+    def QueueCallable(self, callback : Callable[[], None], msg : str = "Operation has been queued"):
+        notifyMessage(msg)
+        self.QueueOperation(AttemptOperation(callback))
+
+    def Dequeue(self, operations : list[AttemptOperation]):
+        if self._hasStarted:
+            self.stop()
+            for op in operations:
+                self._operations.remove(op)
+            self.start()
+        else:
+            for op in operations:
+                self._operations.remove(op)
+
+    def start(self):
+        self._hasStarted = True
+        self.reset_timer().start()
+
+    def stop(self):
+        self._hasStarted = False
+        if self._timer:
+            self._timer.cancel()
+            self._timer = None
+
+    def inquire(self):
+        operationsToRemove : list[AttemptOperation] = []
+        for op in self._operations:
+            if op.tryExecute():
+                operationsToRemove.append(op)
+        if len(operationsToRemove):
+            self.Dequeue(operationsToRemove)
+
+        self.stop()
+        if len(self._operations):
+            self.start()
+
+attemptsManager : AttemptsManager= AttemptsManager()
+
 """ Setup file system monitoring """
 
 import shutil
@@ -368,6 +461,8 @@ class Watcher:
     
     def configureObserver(self, ignorePatterns : Any = []):
         self.ignorePaths = ignorePatterns
+        _, file_name = os.path.split(self.sourcePath)
+        self.observer.name = f'observer-{file_name}'
         self.handler = PatternMatchingEventHandler(
             "*", ignorePatterns, ignore_directories=False, case_sensitive=True)
         self.handler.on_created = self.on_created
@@ -406,43 +501,66 @@ class Watcher:
         destination = self.destinationPath(srcPath)
         return CopyMethod(srcPath, destination)
     
+    def _create(self, srcPath):
+        if os.path.isfile(srcPath):
+            destination = self.copyItem(srcPath)
+            notifyMessage(f"{destination} has been created!")
+    
     def on_created(self, event : FileSystemEvent):
         srcPath = str(event.src_path)
         if self.shouldIgnore(srcPath):
             return
         try:
-            if os.path.isfile(srcPath): #and os.path.getsize(srcPath) > 0: # == (lazy_backuping)
-                destination = self.copyItem(srcPath)
-                notifyMessage(f"{destination} has been created!")
+            self._create(srcPath)
+        except PermissionError as permissionErr:
+            attemptsManager.QueueCallable(lambda : self._create(srcPath), f"Deletion of {self.destinationPath(srcPath)} operation has been queued")
+            attemptsManager.start()
         except OSError as osErr:
             notifyEvent(str(osErr), MONITOR_CAT, ERROR)
 
+    def _delete(self, destination):
+        if os.path.isfile(destination):
+            os.remove(destination)
+        else:
+            shutil.rmtree(destination)
+        notifyMessage(f"{destination} has been deleted!")
+    
     def on_deleted(self, event : FileSystemEvent):
         srcPath = str(event.src_path)
         if self.shouldIgnore(srcPath):
             return
         destination = self.destinationPath(srcPath)
         try:
-            if os.path.isfile(destination):
-                os.remove(destination)
-            else:
-                shutil.rmtree(destination)
-            notifyMessage(f"{destination} has been deleted!")
+            self._delete(destination)
+        except PermissionError as permissionErr:
+            attemptsManager.QueueCallable(lambda : self._delete(destination), f"Deletion of {self.destinationPath(destination)} operation has been queued")
+            attemptsManager.start()
         except OSError as osErr:
             notifyEvent(str(osErr), MONITOR_CAT, ERROR)
 
+    def _replace(self, srcPath):
+        if os.path.isfile(srcPath):
+            dst = self.destinationPath(srcPath)
+            if not os.path.exists(dst) or not filecmp.cmp(srcPath, dst):
+                destination = CopyMethod(srcPath, dst)
+                notifyMessage(f"{destination} has been replaced!")
+    
     def on_modified(self, event : FileSystemEvent):
         srcPath = str(event.src_path)
         if self.shouldIgnore(srcPath):
             return
         try:
-            if os.path.isfile(srcPath):
-                dst = self.destinationPath(srcPath)
-                if not os.path.exists(dst) or not filecmp.cmp(srcPath, dst):
-                    destination = CopyMethod(srcPath, dst)
-                    notifyMessage(f"{destination} has been replaced!")
+            self._replace(srcPath)
+        except PermissionError as permissionErr:
+            attemptsManager.QueueCallable(lambda : self._replace(srcPath), f"Replace of {self.destinationPath(srcPath)} operation has been queued")
+            attemptsManager.start()
         except OSError as osErr:
             notifyEvent(str(osErr), MONITOR_CAT, ERROR)
+
+    def nameIsDifferent(self, srcPath, destPath) -> bool:
+        _,srcName = os.path.split(srcPath)
+        _,dstName = os.path.split(destPath)
+        return srcName != dstName
 
     def on_moved(self, event : FileSystemMovedEvent):
         srcPath = str(event.src_path)
@@ -451,12 +569,21 @@ class Watcher:
         targetSourcePath = self.destinationPath(srcPath) 
         destPath = str(event.dest_path)
         targetDestPath = self.destinationPath(destPath)
-        try:
-            if path.exists(targetSourcePath):
-                os.rename(targetSourcePath, targetDestPath)
-                notifyMessage(f"{srcPath} has been moved to {event.dest_path}!")
-        except OSError as osErr:
-            notifyEvent(str(osErr), MONITOR_CAT, ERROR)
+
+        if path.exists(targetSourcePath) and self.nameIsDifferent(srcPath, destPath):
+            try:
+                self._rename(targetSourcePath, targetDestPath)
+            except PermissionError as permissionErr:
+                attemptsManager.QueueCallable(lambda : self._rename(targetSourcePath, targetDestPath), f"Rename of {targetSourcePath} operation has been queued")
+                attemptsManager.start()
+            except OSError as osErr:
+                notifyEvent(str(osErr), MONITOR_CAT, ERROR)
+
+    def _rename(self, targetSourcePath, targetDestPath):
+        if os.path.exists(targetDestPath):
+            self._delete(targetDestPath)
+        os.rename(targetSourcePath, targetDestPath)
+        notifyMessage(f"{targetSourcePath} has been moved to {targetDestPath}!")
 
 def observeFileSystem(observers : list[Watcher] = None):
     if observers:
@@ -518,7 +645,7 @@ def ensureDataIsBackuped(includes: list[Include], observers : list[Watcher] = No
 
 import atexit
 import subprocess
-from threading import Thread
+from threading import Thread, Timer
 
 try:
     import win32api, win32con, win32gui
@@ -666,7 +793,7 @@ def runDeviceWatcher(config, watchers) -> Thread | None:
                         lambda rules: activateRules(rules, watchers), 
                         lambda rules: deactivateRules(rules, watchers))
         
-        devWatcher = threading.Thread(target=devicesWatcher.run, name="Device-Watcher")
+        devWatcher = threading.Thread(target=devicesWatcher.run, name="device-watcher")
         devWatcher.daemon = True
         devWatcher.start()
         return devWatcher
@@ -678,6 +805,16 @@ def runDeviceWatcher(config, watchers) -> Thread | None:
 
 def main():
     print(TITLE)
+
+    # attemptsManager : AttemptsManager = AttemptsManager(datetime.timedelta(seconds=6))
+    # attemptsManager.QueueOperation(AttemptOperation(lambda: print("Attempt #1")))
+    # def f():
+    #     print("Attempt #2"); 
+    #     raise Exception("Exception")
+    # attemptsManager.QueueOperation(AttemptOperation(f))
+    # attemptsManager.QueueOperation(AttemptOperation(lambda: print("Attempt #3")))
+    # attemptsManager.start()
+    # input()
 
     try:
         # currentPath = os.path.dirname()
