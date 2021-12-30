@@ -1,11 +1,10 @@
 
 from __future__ import annotations
 from abc import abstractmethod
-from multiprocessing.context import Process
-from platform import system
-import threading
-from typing import Any, AnyStr, Callable, Deque, Generic, Iterator, List, Set, Tuple, Type, TypeVar, overload
+from typing import Any, Callable, Iterator
 from dataclasses import dataclass
+
+import threading
 
 APPLICATION_NAME = "fi-supporter"
 APP_VERSION = "0.1"
@@ -17,26 +16,24 @@ from io import TextIOWrapper
 import winreg as reg
 import os
 
-currentUserKey = reg.HKEY_CURRENT_USER
-allUsersKey = reg.HKEY_LOCAL_MACHINE
-keyValue = "Software\\Microsoft\\Windows\\CurrentVersion\\Run"
+current_user_key = reg.HKEY_CURRENT_USER
+all_users_key = reg.HKEY_LOCAL_MACHINE
+key_value = "Software\\Microsoft\\Windows\\CurrentVersion\\Run"
 
+def set_registry_key(path, reg_key_name, open):
+    reg.SetValueEx(open, reg_key_name, 0, reg.REG_SZ, path)
 
-def setRegistryKey(path, regKeyName, open):
-    reg.SetValueEx(open, regKeyName, 0, reg.REG_SZ, path)
-
-def tryAddToRegistry(path : str, regKeyName : str, all_users : bool = False):
+def try_add_to_registry(path : str, reg_key_name : str, all_users : bool = False):
     
-    keyCategory = (allUsersKey if all_users else currentUserKey)
-    keyType = reg.ConnectRegistry(None, keyCategory)
-    open = reg.OpenKey(keyType, keyValue, 0, reg.KEY_ALL_ACCESS)
+    key_category = (all_users_key if all_users else current_user_key)
+    key_type = reg.ConnectRegistry(None, key_category)
+    open = reg.OpenKey(key_type, key_value, 0, reg.KEY_ALL_ACCESS)
     try:
-        #open = reg.OpenKey(keyType, regKeyName)
-        value, type = reg.QueryValueEx(open, regKeyName)
+        value, type = reg.QueryValueEx(open, reg_key_name)
         if not (type == reg.REG_SZ and value == path):
-            setRegistryKey(path, regKeyName, open)
+            set_registry_key(path, reg_key_name, open)
     except FileNotFoundError:
-        setRegistryKey(path, regKeyName, open)
+        set_registry_key(path, reg_key_name, open)
     finally:
         reg.CloseKey(open)
 
@@ -56,41 +53,41 @@ DEVICE_MONITORING_CAT = "Device monitoring"
 
 NO_INCLUDE_PATHS_ERROR = "You have not specified any valid include paths"
 
-logFile : TextIOWrapper
+log_file : TextIOWrapper
 
 def log(msg : str):
     if not msg.endswith(os.linesep):
         msg += os.linesep
-    logFile.writelines(msg)
+    log_file.writelines(msg)
 
-def notifyMessage(message : str | Exception, end=os.linesep):
+def notify_message(message : str | Exception, end=os.linesep):
     message = str(message)
     print(message, end=end)
     log(message)
 
-def notifyEvent(message : str, category : str, type : str):
+def notify_event(message : str, category : str, type : str):
     msg = f"{type}: {category}. {message}{os.linesep}"
-    notifyMessage(msg, end='')
+    notify_message(msg, end='')
 
-def raiseError(message : str, category : str):
-    notifyEvent(message, category, ERROR)
+def raise_error(message : str, category : str):
+    notify_event(message, category, ERROR)
     raise Exception(message)
 
-def raiseWarning(message : str, category : str):
-    notifyEvent(message, category, WARNING)
+def raise_warning(message : str, category : str):
+    notify_event(message, category, WARNING)
 
-def pathIfExists(filePath : str) -> str | None:
-    if filePath and path.exists(filePath):
-        return filePath
+def get_path_if_exists(file_path : str) -> str | None:
+    if file_path and path.exists(file_path):
+        return file_path
     else:
-        raiseWarning(f"Can't find the path '{filePath}'", INVALID_CONFIG_CAT)
+        raise_warning(f"Can't find the path '{file_path}'", INVALID_CONFIG_CAT)
         return None
 
-def existentPaths(paths : list[str]) -> Iterator[str]:
-    for p in paths:
-        existentPath = pathIfExists(p)
-        if existentPath:
-            yield path.abspath(str(existentPath))
+def get_existent_paths(paths : list[str]) -> Iterator[str]:
+    for one_path in paths:
+        existent_path = get_path_if_exists(one_path)
+        if existent_path:
+            yield path.abspath(str(existent_path))
 
 
 class CustomJsonEncoder(json.JSONEncoder):
@@ -100,7 +97,7 @@ class CustomJsonEncoder(json.JSONEncoder):
         else:
             return json.JSONEncoder.default(self, o)
 
-def printConfiguration(config):
+def print_configuration(config):
     s = json.dumps(config, cls=CustomJsonEncoder, indent=4)
     print("\nConfiguration: \n" + s)
 
@@ -113,85 +110,53 @@ EXCLUDES = 'excludes'
 PATHS = 'paths'
 TARGET_PATH = 'targetPath'
 
-
 class ConfigurationRule:
     @abstractmethod
     def accept(self, visitor : ConfigurationVisitor):
         pass
 
-# class Exclude(ConfigurationRule):
-#     paths : list[str]
-#     includes : list[Include]
-
-#     def __init__(self, paths : list[str], includes : list[Include]) -> None:
-#         self.paths = paths
-#         self.includes = includes
-        
-#     @staticmethod
-#     def fromObject(obj : dict, defaultTargetPath = None) -> Exclude:
-#         paths = list(obj.get(PATHS))
-#         if paths:
-#             paths = list(existentPaths(paths))
-#         else:
-#             return None
-
-#         includes = Exclude.parseIncludes(obj, defaultTargetPath)
-
-#         return Exclude(paths, includes)
-    
-#     def accept(self, visitor : ConfigurationVisitor):
-#         visitor.visitExclude(self)
-    
-#     def __repr__(self) -> str:
-#         return str(self.__dict__)
-
 class Include(ConfigurationRule):
-    isActive : bool
-    includePaths : list[str]
-    targetPath : str
+    is_active : bool
+    include_paths : list[str]
+    target_path : str
     excludes : list[str]
 
-    def __init__(self, includes : list[str], targetPath : str, excludes : list[str]) -> None:
-        self.isActive = True
-        self.includePaths = includes
-        self.targetPath = targetPath
+    def __init__(self, includes : list[str], target_path : str, excludes : list[str]) -> None:
+        self.is_active = True
+        self.include_paths = includes
+        self.target_path = target_path
         self.excludes = excludes
 
     @staticmethod
-    def fromObject(obj : dict) -> Include:
-        pathsObj : list[str] = obj.get(PATHS) 
-        paths : list[str] = list(pathsObj)
+    def from_object(obj : dict) -> Include:
+        paths_obj : list[str] = obj.get(PATHS) 
+        paths : list[str] = list(paths_obj)
         if not paths or not len(paths):
-            raiseError(NO_INCLUDE_PATHS_ERROR, INVALID_CONFIG_CAT)
+            raise_error(NO_INCLUDE_PATHS_ERROR, INVALID_CONFIG_CAT)
         
-        paths = list(existentPaths(paths))
+        paths = list(get_existent_paths(paths))
 
         if not len(paths):
-            raiseError(NO_INCLUDE_PATHS_ERROR, INVALID_CONFIG_CAT)
+            raise_error(NO_INCLUDE_PATHS_ERROR, INVALID_CONFIG_CAT)
         
-        targetPath = path.abspath(str(obj.get(TARGET_PATH)))
+        target_path = path.abspath(str(obj.get(TARGET_PATH)))
 
-        if not targetPath:
-            raiseError(f"'{TARGET_PATH}' is unspecified", INVALID_CONFIG_CAT)
-
-        # isActive = True
-        # if not path.exists(targetPath):
-        #     isActive = False
-        #     raiseWarning(f"'{TARGET_PATH}' does not exist, therefore this rule is ignored. Once this target path '{targetPath}' appears in file system the corresponding rule will be activated.", INCORRECT_CONFIG_CAT)
+        if not target_path:
+            raise_error(f"'{TARGET_PATH}' is unspecified", INVALID_CONFIG_CAT)
         
         excludes = obj.get(EXCLUDES)
         if excludes and len(excludes):
-            excludes = list(existentPaths(excludes))
+            excludes = list(get_existent_paths(excludes))
         else:
             excludes = []
 
-        return Include(paths, targetPath, excludes)
+        return Include(paths, target_path, excludes)
     
     def accept(self, visitor : ConfigurationVisitor):
-        visitor.visitInclude(self)
+        visitor.visit_include(self)
         if self.excludes:
             for exclude in list(self.excludes):
-                visitor.visitExclude(exclude)
+                visitor.visit_exclude(exclude)
     
     def __repr__(self) -> str:
         return str(self.__dict__)
@@ -204,13 +169,13 @@ class Configuration(ConfigurationRule):
         self.includes = includes
     
     @staticmethod
-    def parseIncludes(obj : dict) -> list[Include] | None:
-        includesObj = obj.get(INCLUDES)
-        if includesObj and len(includesObj):
+    def parse_includes(obj : dict) -> list[Include] | None:
+        includes_obj = obj.get(INCLUDES)
+        if includes_obj and len(includes_obj):
             includes : list[Include] = list();
-            for includeObj in includesObj:
-                if includeObj:
-                    include = Include.fromObject(includeObj)
+            for include_obj in includes_obj:
+                if include_obj:
+                    include = Include.from_object(include_obj)
                     if include:
                         includes.append(include)
             if (len(includes)):
@@ -218,23 +183,23 @@ class Configuration(ConfigurationRule):
         return None
 
     @staticmethod
-    def fromObj(obj : dict) -> Configuration:
-        includes = Configuration.parseIncludes(obj)
+    def from_object(obj : dict) -> Configuration:
+        includes = Configuration.parse_includes(obj)
         if includes and len(includes):
             return Configuration(includes)
         else:
-            raiseError("No includes specified", INVALID_CONFIG_CAT)
+            raise_error("No includes specified", INVALID_CONFIG_CAT)
 
     @staticmethod
-    def fromString(contents : str) -> Configuration:
-        return Configuration.fromObj(json.loads(contents))
+    def from_string(contents : str) -> Configuration:
+        return Configuration.from_object(json.loads(contents))
 
     @staticmethod
-    def fromFile(fi : TextIOWrapper) -> Configuration:
-        return Configuration.fromString(fi.read())
+    def from_file(fi : TextIOWrapper) -> Configuration:
+        return Configuration.from_string(fi.read())
 
     def accept(self, visitor : ConfigurationVisitor):
-        visitor.visitConfiguration(self)
+        visitor.visit_configuration(self)
         for include in self.includes:
             include.accept(visitor)
 
@@ -242,8 +207,8 @@ class Configuration(ConfigurationRule):
         return str(self.__dict__)
     
 
-configFileName = "config.json"
-configTemplate = """{
+CONFIG_FILE_NAME = "config.json"
+CONFIG_TEMPLATE = """{
     "includes" : [
         {
             "paths" : [""], 
@@ -257,94 +222,87 @@ configTemplate = """{
     ]
 }"""
 
-def tryReadConfig(appFolder : str) -> Configuration :
+def try_read_config(appFolder : str) -> Configuration :
     try:
-        configFile = os.path.join(appFolder, configFileName)
-        print("Configuration path: ", configFile)
-        if path.exists(configFile):
-            with open(configFile, 'r') as configFile:
-                return Configuration.fromFile(configFile)
+        config_file = os.path.join(appFolder, CONFIG_FILE_NAME)
+        print("Configuration path: ", config_file)
+        if path.exists(config_file):
+            with open(config_file, 'r') as config_file:
+                return Configuration.from_file(config_file)
         else:
-            with open(configFile, 'w') as configFile:
-                configFile.write(configTemplate)
-                raiseError("Created config. Modify the configuration file and restart the application after that", INVALID_CONFIG_CAT)
+            with open(config_file, 'w') as config_file:
+                config_file.write(CONFIG_TEMPLATE)
+                raise_error("Created config. Modify the configuration file and restart the application after that", INVALID_CONFIG_CAT)
     except OSError as osErr:
-        raiseError(str(osErr), FS_ERROR_CAT)
+        raise_error(str(osErr), FS_ERROR_CAT)
 
 
 """ Configuration Manipulations """
 
 class ConfigurationVisitor:
     @abstractmethod
-    def visitConfiguration(self, config : Configuration) -> None:
+    def visit_configuration(self, config : Configuration) -> None:
         pass
     
     @abstractmethod
-    def visitInclude(self, include : Include) -> None:
+    def visit_include(self, include : Include) -> None:
         pass
 
     @abstractmethod
-    def visitExclude(self, exclude : str) -> None:
+    def visit_exclude(self, exclude : str) -> None:
         pass
 
 class ConfigurationValidationVisitor(ConfigurationVisitor):
-    parentInclude : Include
+    parent_include : Include
 
     def __init__(self) -> None:
         super().__init__()
 
-    def visitConfiguration(self, config : Configuration) -> None:
-        super().visitConfiguration(config)
+    def visit_configuration(self, config : Configuration) -> None:
+        super().visit_configuration(config)
     
-    def visitInclude(self, include : Include) -> None:
-        self.parentInclude = include
-        super().visitInclude(include)
+    def visit_include(self, include : Include) -> None:
+        self.parent_include = include
+        super().visit_include(include)
     
-    def visitExclude(self, exclude : str) -> None:
+    def visit_exclude(self, exclude : str) -> None:
         # Check whether exclude paths are subpaths of include paths:
-        isSub = False
-        for includePath in self.parentInclude.includePaths:
-            if exclude.startswith(includePath):
-                isSub = True
-        if not isSub:
-            raiseWarning(f'Exclude path "{exclude}" is not a subfolder of any "{self.parentInclude.includePaths}"', INVALID_CONFIG_CAT)
-            self.parentInclude.excludes.remove(exclude)
-        super().visitExclude(exclude)
+        is_sub = False
+        for include_path in self.parent_include.include_paths:
+            if exclude.startswith(include_path):
+                is_sub = True
+        if not is_sub:
+            raise_warning(f'Exclude path "{exclude}" is not a subfolder of any "{self.parent_include.include_paths}"', INVALID_CONFIG_CAT)
+            self.parent_include.excludes.remove(exclude)
+        super().visit_exclude(exclude)
 
 class ConfigurationUpdateActiveDrivesVisitor(ConfigurationVisitor):
 
-    activatedRules : list[Include]
-    deactivatedRules : list[Include]
+    activated_rules : list[Include]
+    deactivated_rules : list[Include]
 
     def __init__(self) -> None:
-        self.activatedRules = []
-        self.deactivatedRules = []
+        self.activated_rules = []
+        self.deactivated_rules = []
         super().__init__()
 
-    def visitInclude(self, include: Include) -> None:
-        wasActive = include.isActive
-        drive, _ = os.path.splitdrive(include.targetPath)
-        include.isActive = os.path.exists(drive)
-        if wasActive ^ include.isActive:
-            if include.isActive:
-                self.activatedRules.append(include)
-                notifyMessage(f"Rule for target path: '{include.targetPath}' is activated")
+    def visit_include(self, include: Include) -> None:
+        was_active = include.is_active
+        drive, _ = os.path.splitdrive(include.target_path)
+        include.is_active = os.path.exists(drive)
+        if was_active ^ include.is_active:
+            if include.is_active:
+                self.activated_rules.append(include)
+                notify_message(f"Rule for target path: '{include.target_path}' is activated")
             else:
-                self.deactivatedRules.append(include)
-                notifyMessage(f"Rule for target path: '{include.targetPath}' is deactivated because the drive '{drive}' does not exists. Once the device is plugged in, the corresponding rule will be activated.")
-        return super().visitInclude(include)
+                self.deactivated_rules.append(include)
+                notify_message(f"Rule for target path: '{include.target_path}' is deactivated because the drive '{drive}' does not exists. Once the device is plugged in, the corresponding rule will be activated.")
+        return super().visit_include(include)
 
 """ Periodical attempts to execute unsuccessful synchronizions """
 
-import datetime
 from threading import Timer
-
-# class classproperty(property):
-#     def __get__(self, __cls: Any, __owner) -> Any:
-#         if self.fget == None:
-#             return None
-#         else:
-#             return classmethod(self.fget).__get__(None, __owner)()
+import datetime
 
 class AttemptOperation:
     operation : Callable[[], None]
@@ -352,24 +310,24 @@ class AttemptOperation:
     def __init__(self, operation : Callable[[], None]) -> None:
         self.operation = operation
 
-    def tryExecute(self) -> bool:
+    def try_execute(self) -> bool:
         try:
             self.operation()
             return True
         except Exception as ex:
-            notifyEvent(str(ex), ATTEMPT_OPERATION_CAT, ERROR)
+            notify_event(str(ex), ATTEMPT_OPERATION_CAT, ERROR)
             return False
 
 class AttemptsManager:
     _timer : Timer | None;
     _period : float
     _operations : list[AttemptOperation]
-    _hasStarted : bool
+    _has_started : bool
 
     def __init__(self, time_delta : datetime.timedelta = datetime.timedelta(minutes=1)) -> None:
         self._period = time_delta.seconds
         self._operations = []
-        self._hasStarted = False
+        self._has_started = False
         self._timer = None
         self.reset_timer()
 
@@ -380,20 +338,20 @@ class AttemptsManager:
         self._timer.daemon = True
         return self._timer
 
-    def QueueOperation(self, operation : AttemptOperation):
-        if self._hasStarted:
+    def queue_operation(self, operation : AttemptOperation):
+        if self._has_started:
             self.stop()
             self._operations.append(operation)
             self.start()
         else:
             self._operations.append(operation)
     
-    def QueueCallable(self, callback : Callable[[], None], msg : str = "Operation has been queued"):
-        notifyMessage(msg)
-        self.QueueOperation(AttemptOperation(callback))
+    def queue_callable(self, callback : Callable[[], None], msg : str = "Operation has been queued"):
+        notify_message(msg)
+        self.queue_operation(AttemptOperation(callback))
 
-    def Dequeue(self, operations : list[AttemptOperation]):
-        if self._hasStarted:
+    def dequeue(self, operations : list[AttemptOperation]):
+        if self._has_started:
             self.stop()
             for op in operations:
                 self._operations.remove(op)
@@ -403,68 +361,67 @@ class AttemptsManager:
                 self._operations.remove(op)
 
     def start(self):
-        self._hasStarted = True
+        self._has_started = True
         self.reset_timer().start()
 
     def stop(self):
-        self._hasStarted = False
+        self._has_started = False
         if self._timer:
             self._timer.cancel()
             self._timer = None
 
     def inquire(self):
-        operationsToRemove : list[AttemptOperation] = []
+        operations_to_remove : list[AttemptOperation] = []
         for op in self._operations:
-            if op.tryExecute():
-                operationsToRemove.append(op)
-        if len(operationsToRemove):
-            self.Dequeue(operationsToRemove)
+            if op.try_execute():
+                operations_to_remove.append(op)
+        if len(operations_to_remove):
+            self.dequeue(operations_to_remove)
 
         self.stop()
         if len(self._operations):
             self.start()
 
-attemptsManager : AttemptsManager= AttemptsManager()
+attempts_manager : AttemptsManager = AttemptsManager()
 
 """ Setup file system monitoring """
+
+from watchdog.observers import Observer
+from watchdog.events import FileSystemEvent, FileSystemEventHandler, FileSystemMovedEvent, PatternMatchingEventHandler
 
 import shutil
 import filecmp
 
-from watchdog.observers import Observer
-from watchdog.events import FileSystemEvent, FileSystemEventHandler, FileSystemMovedEvent, PatternMatchingEventHandler
-from watchdog.utils import patterns
-
-def ensureParentFolderExists(dst : str):
+def ensure_parent_folder_exists(dst : str):
     folder, _ = os.path.split(dst)
     if not os.path.exists(folder):
-        ensureParentFolderExists(folder)
+        ensure_parent_folder_exists(folder)
         os.mkdir(folder)
 
-def CopyMethod(src, dst):
-    ensureParentFolderExists(dst)
+def copy_method(src, dst):
+    ensure_parent_folder_exists(dst)
     return shutil.copy2(src, dst)
 
 class Watcher:
-    sourcePath : str
-    baseTargetPath : str
-    sourceFolderName : str
-    ignorePaths : list[str]
+    source_path : str
+    base_target_path : str
+    source_folder_name : str
+    ignore_paths : list[str]
     observer : Observer
     handler : FileSystemEventHandler
 
-    def __init__(self, src : str, baseTargetPath : str, sourceFolderName : str) -> None:
-        self.sourcePath = src
-        self.baseTargetPath = baseTargetPath
-        self.sourceFolderName = sourceFolderName
+    def __init__(self, src : str, base_target_path : str, source_folder_name : str) -> None:
+        self.source_path = src
+        self.base_target_path = base_target_path
+        self.source_folder_name = source_folder_name
         self.observer = Observer()
     
-    def configureObserver(self, ignorePatterns : Any = []):
-        self.ignorePaths = ignorePatterns
-        _, file_name = os.path.split(self.sourcePath)
+    def configure_observer(self, ignore_patterns : Any = []):
+        self.ignore_paths = ignore_patterns
+        _, file_name = os.path.split(self.source_path)
         self.observer.name = f'observer-{file_name}'
         self.handler = PatternMatchingEventHandler(
-            "*", ignorePatterns, ignore_directories=False, case_sensitive=True)
+            "*", ignore_patterns, ignore_directories=False, case_sensitive=True)
         self.handler.on_created = self.on_created
         self.handler.on_deleted = self.on_deleted
         self.handler.on_modified = self.on_modified
@@ -472,9 +429,9 @@ class Watcher:
     
     def run(self):
         if self.handler == None:
-            self.configureObserver()
+            self.configure_observer()
         try:
-            self.observer.schedule(self.handler, self.sourcePath, recursive=True)
+            self.observer.schedule(self.handler, self.source_path, recursive=True)
             self.observer.start()
         except Exception as ex:
             raise ex
@@ -483,163 +440,161 @@ class Watcher:
         self.observer.stop()
         self.observer.join()
 
-    def shouldIgnore(self, path : str) -> bool:
-        for ignorePath in self.ignorePaths: 
-            if path.startswith(os.path.join(self.sourcePath, ignorePath)):
+    def _should_ignore(self, path : str) -> bool:
+        for ignore_path in self.ignore_paths: 
+            if path.startswith(os.path.join(self.source_path, ignore_path)):
                 return True
         return False
 
     @property
-    def targetPath(self):
-        return os.path.join(self.baseTargetPath, self.sourceFolderName)
+    def target_path(self):
+        return os.path.join(self.base_target_path, self.source_folder_name)
 
-    def destinationPath(self, fromPath : str):
-        tailSubpath = fromPath.removeprefix(self.sourcePath).removeprefix(os.sep)
-        return path.join(self.targetPath, tailSubpath)
+    def _destination_path(self, from_path : str):
+        tail_subpath = from_path.removeprefix(self.source_path).removeprefix(os.sep)
+        return path.join(self.target_path, tail_subpath)
     
-    def copyItem(self, srcPath : str) -> str:
-        destination = self.destinationPath(srcPath)
-        return CopyMethod(srcPath, destination)
+    def _copy_item(self, src_path : str) -> str:
+        destination = self._destination_path(src_path)
+        return copy_method(src_path, destination)
     
-    def _create(self, srcPath):
-        if os.path.isfile(srcPath):
-            destination = self.copyItem(srcPath)
-            notifyMessage(f"{destination} has been created!")
+    def _create(self, src_path):
+        if os.path.isfile(src_path):
+            destination = self._copy_item(src_path)
+            notify_message(f"{destination} has been created!")
     
     def on_created(self, event : FileSystemEvent):
-        srcPath = str(event.src_path)
-        if self.shouldIgnore(srcPath):
+        src_path = str(event.src_path)
+        if self._should_ignore(src_path):
             return
         try:
-            self._create(srcPath)
+            self._create(src_path)
         except PermissionError as permissionErr:
-            attemptsManager.QueueCallable(lambda : self._create(srcPath), f"Deletion of {self.destinationPath(srcPath)} operation has been queued")
-            attemptsManager.start()
-        except OSError as osErr:
-            notifyEvent(str(osErr), MONITOR_CAT, ERROR)
+            attempts_manager.queue_callable(lambda : self._create(src_path), f"Deletion of {self._destination_path(src_path)} operation has been queued")
+            attempts_manager.start()
+        except OSError as os_err:
+            notify_event(str(os_err), MONITOR_CAT, ERROR)
 
     def _delete(self, destination):
         if os.path.isfile(destination):
             os.remove(destination)
         else:
             shutil.rmtree(destination)
-        notifyMessage(f"{destination} has been deleted!")
+        notify_message(f"{destination} has been deleted!")
     
     def on_deleted(self, event : FileSystemEvent):
-        srcPath = str(event.src_path)
-        if self.shouldIgnore(srcPath):
+        src_path = str(event.src_path)
+        if self._should_ignore(src_path):
             return
-        destination = self.destinationPath(srcPath)
+        destination = self._destination_path(src_path)
         try:
             self._delete(destination)
         except PermissionError as permissionErr:
-            attemptsManager.QueueCallable(lambda : self._delete(destination), f"Deletion of {self.destinationPath(destination)} operation has been queued")
-            attemptsManager.start()
-        except OSError as osErr:
-            notifyEvent(str(osErr), MONITOR_CAT, ERROR)
+            attempts_manager.queue_callable(lambda : self._delete(destination), f"Deletion of {self._destination_path(destination)} operation has been queued")
+            attempts_manager.start()
+        except OSError as os_err:
+            notify_event(str(os_err), MONITOR_CAT, ERROR)
 
-    def _replace(self, srcPath):
-        if os.path.isfile(srcPath):
-            dst = self.destinationPath(srcPath)
-            if not os.path.exists(dst) or not filecmp.cmp(srcPath, dst):
-                destination = CopyMethod(srcPath, dst)
-                notifyMessage(f"{destination} has been replaced!")
+    def _replace(self, src_path):
+        if os.path.isfile(src_path):
+            dst = self._destination_path(src_path)
+            if not os.path.exists(dst) or not filecmp.cmp(src_path, dst):
+                destination = copy_method(src_path, dst)
+                notify_message(f"{destination} has been replaced!")
     
     def on_modified(self, event : FileSystemEvent):
-        srcPath = str(event.src_path)
-        if self.shouldIgnore(srcPath):
+        src_path = str(event.src_path)
+        if self._should_ignore(src_path):
             return
         try:
-            self._replace(srcPath)
-        except PermissionError as permissionErr:
-            attemptsManager.QueueCallable(lambda : self._replace(srcPath), f"Replace of {self.destinationPath(srcPath)} operation has been queued")
-            attemptsManager.start()
-        except OSError as osErr:
-            notifyEvent(str(osErr), MONITOR_CAT, ERROR)
+            self._replace(src_path)
+        except PermissionError as permission_err:
+            attempts_manager.queue_callable(lambda : self._replace(src_path), f"Replace of {self._destination_path(src_path)} operation has been queued")
+            attempts_manager.start()
+        except OSError as os_err:
+            notify_event(str(os_err), MONITOR_CAT, ERROR)
 
-    def nameIsDifferent(self, srcPath, destPath) -> bool:
-        _,srcName = os.path.split(srcPath)
-        _,dstName = os.path.split(destPath)
-        return srcName != dstName
+    def nameIsDifferent(self, src_path, dest_path) -> bool:
+        _, src_name = os.path.split(src_path)
+        _, dst_name = os.path.split(dest_path)
+        return src_name != dst_name
 
     def on_moved(self, event : FileSystemMovedEvent):
-        srcPath = str(event.src_path)
-        if self.shouldIgnore(srcPath):
+        src_path = str(event.src_path)
+        if self._should_ignore(src_path):
             return
-        targetSourcePath = self.destinationPath(srcPath) 
-        destPath = str(event.dest_path)
-        targetDestPath = self.destinationPath(destPath)
+        target_source_path = self._destination_path(src_path) 
+        dest_path = str(event.dest_path)
+        target_dest_path = self._destination_path(dest_path)
 
-        if path.exists(targetSourcePath) and self.nameIsDifferent(srcPath, destPath):
+        if path.exists(target_source_path) and self.nameIsDifferent(src_path, dest_path):
             try:
-                self._rename(targetSourcePath, targetDestPath)
-            except PermissionError as permissionErr:
-                attemptsManager.QueueCallable(lambda : self._rename(targetSourcePath, targetDestPath), f"Rename of {targetSourcePath} operation has been queued")
-                attemptsManager.start()
+                self._rename(target_source_path, target_dest_path)
+            except PermissionError as permission_err:
+                attempts_manager.queue_callable(lambda : self._rename(target_source_path, target_dest_path), f"Rename of {target_source_path} operation has been queued")
+                attempts_manager.start()
             except OSError as osErr:
-                notifyEvent(str(osErr), MONITOR_CAT, ERROR)
+                notify_event(str(osErr), MONITOR_CAT, ERROR)
 
-    def _rename(self, targetSourcePath, targetDestPath):
-        if os.path.exists(targetDestPath):
-            self._delete(targetDestPath)
-        os.rename(targetSourcePath, targetDestPath)
-        notifyMessage(f"{targetSourcePath} has been moved to {targetDestPath}!")
+    def _rename(self, target_source_path, target_dest_path):
+        if os.path.exists(target_dest_path):
+            self._delete(target_dest_path)
+        os.rename(target_source_path, target_dest_path)
+        notify_message(f"{target_source_path} has been moved to {target_dest_path}!")
 
-def observeFileSystem(observers : list[Watcher] = None):
+def observe_file_system(observers : list[Watcher] = None):
     if observers:
-        for o in observers:
-            o.run()
-            print(f"Monitoring '{o.sourcePath}'")
+        for observer in observers:
+            observer.run()
+            print(f"Monitoring '{observer.source_path}'")
 
 """ Ensure Backuped """
 
-def tryCopy2(src, dst, excludes : list[str], follow_symlinks=True):
+def try_copy2(src, dst, excludes : list[str], follow_symlinks=True):
     try:
         if path.exists(dst):
             if filecmp.cmp(src, dst):
                 return
             else:
                 os.remove(dst)
-        CopyMethod(src, dst)
-        notifyMessage(f"Copied '{src}' to '{dst}'")
+        copy_method(src, dst)
+        notify_message(f"Copied '{src}' to '{dst}'")
     except OSError as e:
-        raiseWarning(str(e), COPY_FILES_CAT)
+        raise_warning(str(e), COPY_FILES_CAT)
 
-def arrangeIgnorePatterns(include : Include) -> list[str]:
+def arrange_ignore_patterns(include : Include) -> list[str]:
     return [
-            exclude.removeprefix(includeSrc + os.sep)
+            exclude.removeprefix(include_src + os.sep)
             for exclude in include.excludes 
-            for includeSrc in include.includePaths 
-            if exclude.startswith(includeSrc)
+            for include_src in include.include_paths 
+            if exclude.startswith(include_src)
         ]
 
-def backupSinglePath(observers : list[Watcher] | None, include : Include, ignorePatterns : list[str], sourcePath : str):
+def backup_single_path(observers : list[Watcher] | None, include : Include, ignore_patterns : list[str], source_path : str):
     try:
-        ignore = shutil.ignore_patterns(*ignorePatterns)
-        sourceFolderName = os.path.basename(sourcePath)
-        targetPath = path.join(include.targetPath, sourceFolderName)
+        ignore = shutil.ignore_patterns(*ignore_patterns)
+        source_folder_name = os.path.basename(source_path)
+        target_path = path.join(include.target_path, source_folder_name)
         shutil.copytree(
-                    sourcePath, targetPath, 
+                    source_path, target_path, 
                     dirs_exist_ok=True, 
                     ignore=ignore,
-                    copy_function=lambda src, dst: tryCopy2(src, dst, include.excludes)
+                    copy_function=lambda src, dst: try_copy2(src, dst, include.excludes)
                     )
         if observers != None:
-            o = Watcher(sourcePath, include.targetPath, sourceFolderName)
-            o.configureObserver(ignorePatterns)
-            observers.append(o)
-    except OSError as osErr:
-        raiseError(str(osErr), FS_ERROR_CAT)
+            observer = Watcher(source_path, include.target_path, source_folder_name)
+            observer.configure_observer(ignore_patterns)
+            observers.append(observer)
+    except OSError as os_err:
+        raise_error(str(os_err), FS_ERROR_CAT)
 
-def ensureDataIsBackuped(includes: list[Include], observers : list[Watcher] = None):
+def ensure_data_is_backuped(includes: list[Include], observers : list[Watcher] = None):
     """If observers is None, don't monitor the file system"""
     for include in includes:
-        ignorePatterns = arrangeIgnorePatterns(include)
-        for sourcePath in include.includePaths:
-            if include.isActive:
-                backupSinglePath(observers, include, ignorePatterns, sourcePath)
-            #else:
-            #    notifyMessage(f"Rule for destination path '{include.targetPath}' is deactivated")
+        ignore_patterns = arrange_ignore_patterns(include)
+        for source_path in include.include_paths:
+            if include.is_active:
+                backup_single_path(observers, include, ignore_patterns, source_path)
 
 """ Device Monitoring """
 
@@ -671,7 +626,7 @@ class Drive:
         return self.letter.__hash__()
     
     @staticmethod
-    def fromJson(values):
+    def from_json(values):
         return Drive(values['deviceid'], values['volumename'], values['drivetype'])
 
 class DeviceListener:
@@ -690,17 +645,17 @@ class DeviceListener:
         0xFFFF: ('DBT_USERDEFINED', 'The meaning of this message is user-defined.'),
     }
 
-    onDrivesChangedHandler : Callable[[], None]
+    on_drives_changed_handler : Callable[[], None]
 
     def __init__(self, drivesChangedCallback : Callable[[], None]) -> None:
-        self.onDrivesChangedHandler = drivesChangedCallback
+        self.on_drives_changed_handler = drivesChangedCallback
 
     def _on_message(self, hwnd : int, msg : int, wparam : int, lparam : int):
         if msg != win32con.WM_DEVICECHANGE:
             return 0
         event, description = self.WM_DEVICECHANGE_EVENTS[wparam]
         if event in ('DBT_DEVNODES_CHANGED', 'DBT_DEVICEREMOVECOMPLETE', 'DBT_DEVICEARRIVAL'):
-            self.onDrivesChangedHandler()
+            self.on_drives_changed_handler()
         return 0
     
     def _create_window(self):
@@ -719,32 +674,28 @@ class DevicesWatcher:
 
     _deviceListener : DeviceListener
     _configuration : Configuration
-    _onActivate : Callable[[list[Include]], None]
-    _onDeactivate : Callable[[list[Include]], None]
+    _on_activate : Callable[[list[Include]], None]
+    _on_deactivate : Callable[[list[Include]], None]
 
     def __init__(self, config : Configuration, activation : Callable[[list[Include]], None], deactivate : Callable[[list[Include]], None]) -> None:
         self._configuration = config
-        self._onActivate = activation
-        self._onDeactivate = deactivate
-        self._deviceListener = DeviceListener(self.devicesChanged)
+        self._on_activate = activation
+        self._on_deactivate = deactivate
+        self._deviceListener = DeviceListener(self.devices_changed)
 
     def run(self):
         self._deviceListener.run()
 
-    def devicesChanged(self):
-        activeDrivesVisitor = ConfigurationUpdateActiveDrivesVisitor()
-        self._configuration.accept(activeDrivesVisitor)
-        if self._onActivate and len(activeDrivesVisitor.activatedRules):
-            self._onActivate(activeDrivesVisitor.activatedRules)
-        if self._onDeactivate and len(activeDrivesVisitor.deactivatedRules):
-            self._onDeactivate(activeDrivesVisitor.deactivatedRules)
-
-        #availableDrives = DevicesWatcher.listDrives()
-        #drivesIntersection = set(availableDrives).intersection(self._drivesToWatch)
-        #print(f"Drives updated:\n{list[drivesIntersection]}")
+    def devices_changed(self):
+        active_drives_visitor = ConfigurationUpdateActiveDrivesVisitor()
+        self._configuration.accept(active_drives_visitor)
+        if self._on_activate and len(active_drives_visitor.activated_rules):
+            self._on_activate(active_drives_visitor.activated_rules)
+        if self._on_deactivate and len(active_drives_visitor.deactivated_rules):
+            self._on_deactivate(active_drives_visitor.deactivated_rules)
 
     @staticmethod
-    def listDrives() -> list[Drive] | None:
+    def list_drives() -> list[Drive] | None:
         proc = subprocess.run(args=[
                 'powershell',
                 '-noprofile',
@@ -757,41 +708,41 @@ class DevicesWatcher:
             return None
         drives = json.loads(proc.stdout)
         if type(drives).__name__ == 'dict':
-            return [Drive.fromJson(drives)]
+            return [Drive.from_json(drives)]
         elif type(drives).__name__ == 'list': 
-            return [Drive.fromJson(drive) for drive in drives]
+            return [Drive.from_json(drive) for drive in drives]
         else:
             raise Exception()
 
-def activateRules(includes : list[Include], watchers : list[Watcher]):
+def activate_rules(includes : list[Include], watchers : list[Watcher]):
     """New includes that were activated; working observers"""
     if includes == None or len(includes) == 0:
         return
 
-    addedObservers = []
-    ensureDataIsBackuped(includes, addedObservers)
-    if len(addedObservers) > 0:
-        observeFileSystem(addedObservers)
-        watchers.extend(addedObservers)
+    added_observers = []
+    ensure_data_is_backuped(includes, added_observers)
+    if len(added_observers) > 0:
+        observe_file_system(added_observers)
+        watchers.extend(added_observers)
 
 
-def deactivateRules(deactivatedIncludes : list[Include], watchers : list[Watcher]):
+def deactivate_rules(deactivated_includes : list[Include], watchers : list[Watcher]):
     """New includes that were deactivated; working observers"""
-    if deactivatedIncludes == None or len(deactivatedIncludes) == 0:
+    if deactivated_includes == None or len(deactivated_includes) == 0:
         return
     
-    watchersClone = watchers[:]
-    for include in deactivatedIncludes:
-        for watcher in watchersClone:
-            if watcher.baseTargetPath == include.targetPath and watcher.sourcePath in include.includePaths:
+    watchers_clone = watchers[:]
+    for include in deactivated_includes:
+        for watcher in watchers_clone:
+            if watcher.base_target_path == include.target_path and watcher.source_path in include.include_paths:
                 watcher.stop()
                 watchers.remove(watcher)
 
-def runDeviceWatcher(config, watchers) -> Thread | None:
+def run_device_watcher(config, watchers) -> Thread | None:
     try:
         devicesWatcher = DevicesWatcher(config, 
-                        lambda rules: activateRules(rules, watchers), 
-                        lambda rules: deactivateRules(rules, watchers))
+                        lambda rules: activate_rules(rules, watchers), 
+                        lambda rules: deactivate_rules(rules, watchers))
         
         devWatcher = threading.Thread(target=devicesWatcher.run, name="device-watcher")
         devWatcher.daemon = True
@@ -799,50 +750,32 @@ def runDeviceWatcher(config, watchers) -> Thread | None:
         return devWatcher
         
     except Exception as ex:
-        notifyMessage(str(ex), DEVICE_MONITORING_CAT)
+        notify_message(str(ex), DEVICE_MONITORING_CAT)
         return None
 
 
 def main():
     print(TITLE)
 
-    # attemptsManager : AttemptsManager = AttemptsManager(datetime.timedelta(seconds=6))
-    # attemptsManager.QueueOperation(AttemptOperation(lambda: print("Attempt #1")))
-    # def f():
-    #     print("Attempt #2"); 
-    #     raise Exception("Exception")
-    # attemptsManager.QueueOperation(AttemptOperation(f))
-    # attemptsManager.QueueOperation(AttemptOperation(lambda: print("Attempt #3")))
-    # attemptsManager.start()
-    # input()
-
     try:
-        # currentPath = os.path.dirname()
-        # address = os.join(currentPath, fileName)
-        global logFile
-        logFile = open("events.log", "w")
+        global log_file
+        log_file = open("events.log", "w")
         path = os.path.realpath(__file__)
-        notifyMessage('Started from: ' + path)
+        notify_message('Started from: ' + path)
 
-        #command = "python " + path
-        #_, tail = os.path.split(path)
-        #registryKeyName = tail.split(".")[0]
-        #print(f"Trying to add to registry key '{registryKeyName}' for '{path}'")
-
-        tryAddToRegistry(path, APPLICATION_NAME)
-        currentFolder, _ = os.path.split(__file__)
-        config = tryReadConfig(currentFolder)
+        try_add_to_registry(path, APPLICATION_NAME)
+        current_folder, _ = os.path.split(__file__)
+        config = try_read_config(current_folder)
         config.accept(ConfigurationValidationVisitor())
-        activeDrivesVisitor = ConfigurationUpdateActiveDrivesVisitor()
-        config.accept(activeDrivesVisitor)
-        #printConfiguration(config)
+        active_drives_visitor = ConfigurationUpdateActiveDrivesVisitor()
+        config.accept(active_drives_visitor)
         watchers = []
-        ensureDataIsBackuped(config.includes, watchers)
+        ensure_data_is_backuped(config.includes, watchers)
         
-        notifyMessage("Running Monitor...")
-        observeFileSystem(watchers)
+        notify_message("Running Monitor...")
+        observe_file_system(watchers)
 
-        runDeviceWatcher(config, watchers)
+        run_device_watcher(config, watchers)
 
         try:
             while True:
@@ -850,15 +783,15 @@ def main():
         except KeyboardInterrupt:
             print(APPLICATION_NAME + " monitoring is interrupted")
 
-    except Exception as anyError:
-        notifyMessage(anyError)
+    except Exception as any_error:
+        notify_message(any_error)
         input()
 
-def onExitHandler():
+def on_exit_handler():
     print('<exited>')
-    logFile.close()
+    log_file.close()
 
 if __name__ == "__main__":
-    atexit.register(onExitHandler)
+    atexit.register(on_exit_handler)
     main()
 
