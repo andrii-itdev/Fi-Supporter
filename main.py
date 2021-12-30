@@ -386,8 +386,13 @@ attempts_manager : AttemptsManager = AttemptsManager()
 
 """ Setup file system monitoring """
 
-from watchdog.observers import Observer
-from watchdog.events import FileSystemEvent, FileSystemEventHandler, FileSystemMovedEvent, PatternMatchingEventHandler
+try:
+    from watchdog.observers import Observer
+    from watchdog.events import FileSystemEvent, FileSystemEventHandler, FileSystemMovedEvent, PatternMatchingEventHandler
+except:
+    os.system('pip install watchdog')
+    from watchdog.observers import Observer
+    from watchdog.events import FileSystemEvent, FileSystemEventHandler, FileSystemMovedEvent, PatternMatchingEventHandler
 
 import shutil
 import filecmp
