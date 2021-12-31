@@ -5,6 +5,9 @@ from typing import Any, Callable, Iterator
 from dataclasses import dataclass
 
 import threading
+import os
+
+os.system("export PYTHONIOENCODING=utf8")
 
 APPLICATION_NAME = "fi-supporter"
 APP_VERSION = "0.1"
@@ -12,9 +15,8 @@ TITLE = APPLICATION_NAME.capitalize() + f" version {APP_VERSION}\n"
 
 """ Registry Manipulations"""
 
-from io import TextIOWrapper
+from io import BufferedWriter, TextIOWrapper
 import winreg as reg
-import os
 
 current_user_key = reg.HKEY_CURRENT_USER
 all_users_key = reg.HKEY_LOCAL_MACHINE
@@ -53,12 +55,15 @@ DEVICE_MONITORING_CAT = "Device monitoring"
 
 NO_INCLUDE_PATHS_ERROR = "You have not specified any valid include paths"
 
-log_file : TextIOWrapper
+log_file : BufferedWriter
 
 def log(msg : str):
-    if not msg.endswith(os.linesep):
-        msg += os.linesep
-    log_file.writelines(msg)
+    try:
+        if not msg.endswith(os.linesep):
+            msg += os.linesep
+        log_file.write(msg.encode('utf8'))
+    except Exception as err:
+        print(err)
 
 def notify_message(message : str | Exception, end=os.linesep):
     message = str(message)
@@ -548,6 +553,7 @@ class Watcher:
         notify_message(f"{target_source_path} has been moved to {target_dest_path}!")
 
 def observe_file_system(observers : list[Watcher] = None):
+    notify_message("Running Monitor...")
     if observers:
         for observer in observers:
             observer.run()
@@ -562,10 +568,17 @@ def try_copy2(src, dst, excludes : list[str], follow_symlinks=True):
                 return
             else:
                 os.remove(dst)
+    except OSError as os_err:
+        raise_warning(f"OS error deleting existent file '{dst}' :: {str(os_err)}", COPY_FILES_CAT)
+    except Exception as err:
+        raise_warning(f"General error comparing source '{src}' and target files '{dst}' :: {str(err)}", COPY_FILES_CAT)
+    try:
         copy_method(src, dst)
         notify_message(f"Copied '{src}' to '{dst}'")
-    except OSError as e:
-        raise_warning(str(e), COPY_FILES_CAT)
+    except OSError as os_err:
+        raise_warning(f"OS error copying files: '{src}' :: {str(os_err)}", COPY_FILES_CAT)
+    except Exception as err:
+        raise_warning(f"General error copying files: '{src}' :: {str(err)}", COPY_FILES_CAT)
 
 def arrange_ignore_patterns(include : Include) -> list[str]:
     return [
@@ -577,9 +590,17 @@ def arrange_ignore_patterns(include : Include) -> list[str]:
 
 def backup_single_path(observers : list[Watcher] | None, include : Include, ignore_patterns : list[str], source_path : str):
     try:
+        if not os.path.exists(source_path):
+            raise_warning(f"Source path does not exist: '{source_path}'", COPY_FILES_CAT)
+            return
         ignore = shutil.ignore_patterns(*ignore_patterns)
         source_folder_name = os.path.basename(source_path)
         target_path = path.join(include.target_path, source_folder_name)
+        if not has_enough_space(source_path, target_path):
+            drive, _ = os.path.splitdrive(target_path)
+            notify_event(f"There's not enough space on the drive {drive} for the rule {source_path} to be executed",
+                    COPY_FILES_CAT, ERROR)
+            return
         shutil.copytree(
                     source_path, target_path, 
                     dirs_exist_ok=True, 
@@ -591,7 +612,27 @@ def backup_single_path(observers : list[Watcher] | None, include : Include, igno
             observer.configure_observer(ignore_patterns)
             observers.append(observer)
     except OSError as os_err:
-        raise_error(str(os_err), FS_ERROR_CAT)
+        raise_warning(str(os_err), FS_ERROR_CAT)
+
+def iterate_files(dir_src : str) -> Iterator[str]:
+    for path, _, file_names in os.walk(dir_src):
+        for file in file_names:
+            yield os.path.join(path, file)
+
+def has_enough_space(src : str, dst : str) -> bool:
+    drive, _ = os.path.splitdrive(dst)
+    free_space = shutil.disk_usage(drive).free
+    total_origin_size = 0
+    for file_path in iterate_files(src):
+        try:
+            total_origin_size += os.path.getsize(file_path)
+            if total_origin_size > free_space:
+                return False
+        except OSError:
+            pass
+    if total_origin_size <= free_space:
+        return True
+
 
 def ensure_data_is_backuped(includes: list[Include], observers : list[Watcher] = None):
     """If observers is None, don't monitor the file system"""
@@ -764,7 +805,7 @@ def main():
 
     try:
         global log_file
-        log_file = open("events.log", "w")
+        log_file = open("events.log", "wb")
         path = os.path.realpath(__file__)
         notify_message('Started from: ' + path)
 
@@ -775,11 +816,11 @@ def main():
         active_drives_visitor = ConfigurationUpdateActiveDrivesVisitor()
         config.accept(active_drives_visitor)
         watchers = []
+        print("Started backuping...")
         ensure_data_is_backuped(config.includes, watchers)
-        
-        notify_message("Running Monitor...")
-        observe_file_system(watchers)
+        print("Ensured data is backuped.")
 
+        observe_file_system(watchers)
         run_device_watcher(config, watchers)
 
         try:
@@ -790,7 +831,9 @@ def main():
 
     except Exception as any_error:
         notify_message(any_error)
+        print("Execution is interrupted")
         input()
+        on_exit_handler()
 
 def on_exit_handler():
     print('<exited>')
