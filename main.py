@@ -3,15 +3,60 @@ from __future__ import annotations
 from abc import abstractmethod
 from typing import Any, Callable, Iterator
 from dataclasses import dataclass
+from os import path
 
 import threading
 import os
-
-os.system("export PYTHONIOENCODING=utf8")
+import sys
 
 APPLICATION_NAME = "fi-supporter"
-APP_VERSION = "0.1"
+APP_VERSION = "0.2"
 TITLE = APPLICATION_NAME.capitalize() + f" version {APP_VERSION}\n"
+
+global CURRENT_PATH
+CURRENT_PATH = os.path.realpath(__file__)
+global CURRENT_DIR
+CURRENT_DIR = os.path.dirname(CURRENT_PATH)
+
+""" Install a Shortcut """
+
+try:
+    import winshell
+except:
+    os.system("pip install winshell")
+    import winshell
+
+from pathlib import Path
+
+def make_path(folder : str, *sub_names : str) -> str:
+    return os.path.join(winshell.folder(folder), *sub_names)
+
+def create_shortcut(app_path : str, create_desktop = False, create_startmenu = True):
+    from os.path import join
+
+    if not create_desktop and not create_startmenu:
+        return
+
+    win32_cmd = make_path('CSIDL_SYSTEM', 'cmd.exe')
+    py_executable = os.path.join(sys.prefix, "python.exe")
+    args_str = f'/K {py_executable} "{app_path}"'
+
+    startmenu = Path(winshell.start_menu())
+    desktop = Path(winshell.desktop())
+
+    def make_lnk(where : Path):
+        if not os.path.exists(where):
+            link_filepath = str(where / f"{APPLICATION_NAME}.lnk")
+            optional_link = winshell.shortcut(link_filepath)
+            if optional_link:
+                with optional_link as link:
+                    link.path = win32_cmd
+                    link.description = f"{APPLICATION_NAME}(backuping)"
+                    link.arguments = args_str
+    if create_desktop:
+        make_lnk(desktop)
+    if create_startmenu:
+        make_lnk(startmenu)
 
 """ Registry Manipulations"""
 
@@ -56,6 +101,12 @@ DEVICE_MONITORING_CAT = "Device monitoring"
 NO_INCLUDE_PATHS_ERROR = "You have not specified any valid include paths"
 
 log_file : BufferedWriter
+
+class NoLog(BufferedWriter):
+    def __init__(self) -> None:
+        pass
+    def write(self, data : bytes):
+        pass
 
 def log(msg : str):
     try:
@@ -107,8 +158,6 @@ def print_configuration(config):
     print("\nConfiguration: \n" + s)
 
 """ Configuration Part """
-
-import os.path as path
 
 INCLUDES = 'includes'
 EXCLUDES = 'excludes'
@@ -636,11 +685,14 @@ def has_enough_space(src : str, dst : str) -> bool:
 
 def ensure_data_is_backuped(includes: list[Include], observers : list[Watcher] = None):
     """If observers is None, don't monitor the file system"""
+    
+    print("Initiated backuping...")
     for include in includes:
         ignore_patterns = arrange_ignore_patterns(include)
         for source_path in include.include_paths:
             if include.is_active:
                 backup_single_path(observers, include, ignore_patterns, source_path)
+    print("Finished backuping.")
 
 """ Device Monitoring """
 
@@ -804,21 +856,25 @@ def main():
     print(TITLE)
 
     try:
-        global log_file
-        log_file = open("events.log", "wb")
-        path = os.path.realpath(__file__)
-        notify_message('Started from: ' + path)
+        os.system(f'chdir "{CURRENT_DIR}"')
 
-        try_add_to_registry(path, APPLICATION_NAME)
+        global log_file
+        try:
+            log_file = open(os.path.join(CURRENT_DIR, "events.log"), "wb")
+        except IOError:
+            log_file = NoLog()
+
+        notify_message('Started from: ' + CURRENT_DIR)
+
+        try_add_to_registry(CURRENT_PATH, APPLICATION_NAME)
+        create_shortcut(CURRENT_PATH)
         current_folder, _ = os.path.split(__file__)
         config = try_read_config(current_folder)
         config.accept(ConfigurationValidationVisitor())
         active_drives_visitor = ConfigurationUpdateActiveDrivesVisitor()
         config.accept(active_drives_visitor)
         watchers = []
-        print("Started backuping...")
         ensure_data_is_backuped(config.includes, watchers)
-        print("Ensured data is backuped.")
 
         observe_file_system(watchers)
         run_device_watcher(config, watchers)
