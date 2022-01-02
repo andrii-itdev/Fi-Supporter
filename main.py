@@ -10,7 +10,7 @@ import os
 import sys
 
 APPLICATION_NAME = "fi-supporter"
-APP_VERSION = "0.2"
+APP_VERSION = "0.3"
 TITLE = APPLICATION_NAME.capitalize() + f" version {APP_VERSION}\n"
 
 global CURRENT_PATH
@@ -31,11 +31,11 @@ from pathlib import Path
 def make_path(folder : str, *sub_names : str) -> str:
     return os.path.join(winshell.folder(folder), *sub_names)
 
-def create_shortcut(app_path : str, create_desktop = False, create_startmenu = True):
+def try_create_shortcut(app_path : str, create_desktop = False, create_startmenu = True) -> bool:
     from os.path import join
 
     if not create_desktop and not create_startmenu:
-        return
+        return False
 
     win32_cmd = make_path('CSIDL_SYSTEM', 'cmd.exe')
     py_executable = os.path.join(sys.prefix, "python.exe")
@@ -44,7 +44,7 @@ def create_shortcut(app_path : str, create_desktop = False, create_startmenu = T
     startmenu = Path(winshell.start_menu())
     desktop = Path(winshell.desktop())
 
-    def make_lnk(where : Path):
+    def make_lnk(where : Path) -> bool:
         if not os.path.exists(where):
             link_filepath = str(where / f"{APPLICATION_NAME}.lnk")
             optional_link = winshell.shortcut(link_filepath)
@@ -53,10 +53,17 @@ def create_shortcut(app_path : str, create_desktop = False, create_startmenu = T
                     link.path = win32_cmd
                     link.description = f"{APPLICATION_NAME}(backuping)"
                     link.arguments = args_str
+                    return True
+        return False
+    
+    desk_lnk = False
     if create_desktop:
-        make_lnk(desktop)
+        desk_lnk = make_lnk(desktop)
+    start_lnk = False
     if create_startmenu:
-        make_lnk(startmenu)
+        start_lnk = make_lnk(startmenu)
+    
+    return desk_lnk or start_lnk
 
 """ Registry Manipulations"""
 
@@ -520,7 +527,10 @@ class Watcher:
     def _create(self, src_path):
         if os.path.isfile(src_path):
             destination = self._copy_item(src_path)
-            notify_message(f"{destination} has been created!")
+        else:
+            os.mkdir(src_path)
+            destination = src_path
+        notify_message(f"{destination} has been created!")
     
     def on_created(self, event : FileSystemEvent):
         src_path = str(event.src_path)
@@ -529,7 +539,7 @@ class Watcher:
         try:
             self._create(src_path)
         except PermissionError as permissionErr:
-            attempts_manager.queue_callable(lambda : self._create(src_path), f"Deletion of {self._destination_path(src_path)} operation has been queued")
+            attempts_manager.queue_callable(lambda : self._create(src_path), f"Creation of {self._destination_path(src_path)} operation has been queued")
             attempts_manager.start()
         except OSError as os_err:
             notify_event(str(os_err), MONITOR_CAT, ERROR)
@@ -568,7 +578,7 @@ class Watcher:
         try:
             self._replace(src_path)
         except PermissionError as permission_err:
-            attempts_manager.queue_callable(lambda : self._replace(src_path), f"Replace of {self._destination_path(src_path)} operation has been queued")
+            attempts_manager.queue_callable(lambda : self._replace(src_path), f"Replacement of {self._destination_path(src_path)} operation has been queued")
             attempts_manager.start()
         except OSError as os_err:
             notify_event(str(os_err), MONITOR_CAT, ERROR)
@@ -590,7 +600,7 @@ class Watcher:
             try:
                 self._rename(target_source_path, target_dest_path)
             except PermissionError as permission_err:
-                attempts_manager.queue_callable(lambda : self._rename(target_source_path, target_dest_path), f"Rename of {target_source_path} operation has been queued")
+                attempts_manager.queue_callable(lambda : self._rename(target_source_path, target_dest_path), f"Renaming of {target_source_path} operation has been queued")
                 attempts_manager.start()
             except OSError as osErr:
                 notify_event(str(osErr), MONITOR_CAT, ERROR)
@@ -610,10 +620,13 @@ def observe_file_system(observers : list[Watcher] = None):
 
 """ Ensure Backuped """
 
+def cmp_names(src : str, dst : str) -> bool:
+    return path.basename(src) == path.basename(dst)
+
 def try_copy2(src, dst, excludes : list[str], follow_symlinks=True):
     try:
         if path.exists(dst):
-            if filecmp.cmp(src, dst):
+            if cmp_names(src, dst) and filecmp.cmp(src, dst):
                 return
             else:
                 os.remove(dst)
@@ -638,30 +651,37 @@ def arrange_ignore_patterns(include : Include) -> list[str]:
         ]
 
 def backup_single_path(observers : list[Watcher] | None, include : Include, ignore_patterns : list[str], source_path : str):
+
+    if not os.path.exists(source_path):
+        raise_warning(f"Source path does not exist: '{source_path}'", COPY_FILES_CAT)
+        return
+    ignore = shutil.ignore_patterns(*ignore_patterns)
+    source_folder_name = os.path.basename(source_path)
+    target_path = path.join(include.target_path, source_folder_name)
+
     try:
-        if not os.path.exists(source_path):
-            raise_warning(f"Source path does not exist: '{source_path}'", COPY_FILES_CAT)
-            return
-        ignore = shutil.ignore_patterns(*ignore_patterns)
-        source_folder_name = os.path.basename(source_path)
-        target_path = path.join(include.target_path, source_folder_name)
         if not has_enough_space(source_path, target_path):
             drive, _ = os.path.splitdrive(target_path)
             notify_event(f"There's not enough space on the drive {drive} for the rule {source_path} to be executed",
                     COPY_FILES_CAT, ERROR)
             return
+
         shutil.copytree(
                     source_path, target_path, 
                     dirs_exist_ok=True, 
                     ignore=ignore,
                     copy_function=lambda src, dst: try_copy2(src, dst, include.excludes)
                     )
+    except OSError as os_err:
+        raise_warning(f"OS error happened: '{str(os_err)}' while backuping '{source_path}'", FS_ERROR_CAT)
+
+    try:
         if observers != None:
             observer = Watcher(source_path, include.target_path, source_folder_name)
             observer.configure_observer(ignore_patterns)
             observers.append(observer)
     except OSError as os_err:
-        raise_warning(str(os_err), FS_ERROR_CAT)
+        raise_warning(f"OS error happened: '{str(os_err)}' while attempting to monitor '{source_path}'", FS_ERROR_CAT)
 
 def iterate_files(dir_src : str) -> Iterator[str]:
     for path, _, file_names in os.walk(dir_src):
@@ -681,6 +701,8 @@ def has_enough_space(src : str, dst : str) -> bool:
             pass
     if total_origin_size <= free_space:
         return True
+    else:
+        return False
 
 
 def ensure_data_is_backuped(includes: list[Include], observers : list[Watcher] = None):
@@ -867,15 +889,15 @@ def main():
         notify_message('Started from: ' + CURRENT_DIR)
 
         try_add_to_registry(CURRENT_PATH, APPLICATION_NAME)
-        create_shortcut(CURRENT_PATH)
-        current_folder, _ = os.path.split(__file__)
-        config = try_read_config(current_folder)
+        try_create_shortcut(CURRENT_PATH)
+
+        config = try_read_config(CURRENT_DIR)
         config.accept(ConfigurationValidationVisitor())
         active_drives_visitor = ConfigurationUpdateActiveDrivesVisitor()
         config.accept(active_drives_visitor)
+
         watchers = []
         ensure_data_is_backuped(config.includes, watchers)
-
         observe_file_system(watchers)
         run_device_watcher(config, watchers)
 
