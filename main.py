@@ -10,7 +10,7 @@ import os
 import sys
 
 APPLICATION_NAME = "fi-supporter"
-APP_VERSION = "0.3"
+APP_VERSION = "0.4"
 TITLE = APPLICATION_NAME.capitalize() + f" version {APP_VERSION}\n"
 
 global CURRENT_PATH
@@ -41,13 +41,17 @@ def try_create_shortcut(app_path : str, create_desktop = False, create_startmenu
     py_executable = os.path.join(sys.prefix, "python.exe")
     args_str = f'/K {py_executable} "{app_path}"'
 
-    startmenu = Path(winshell.start_menu())
+    startmenu = make_path("CSIDL_STARTMENU", 'Programs')
     desktop = Path(winshell.desktop())
 
-    def make_lnk(where : Path) -> bool:
-        if not os.path.exists(where):
-            link_filepath = str(where / f"{APPLICATION_NAME}.lnk")
-            optional_link = winshell.shortcut(link_filepath)
+    lnk_name = f"{APPLICATION_NAME}.lnk"
+
+    def make_lnk(where : Path | str) -> bool:
+        if where is Path:
+            where = str(where)
+        lnk_path = join(where, lnk_name)
+        if not os.path.exists(lnk_path):
+            optional_link = winshell.shortcut(lnk_path)
             if optional_link:
                 with optional_link as link:
                     link.path = win32_cmd
@@ -528,8 +532,8 @@ class Watcher:
         if os.path.isfile(src_path):
             destination = self._copy_item(src_path)
         else:
-            os.mkdir(src_path)
-            destination = src_path
+            destination = self._destination_path(src_path)
+            os.mkdir(destination)
         notify_message(f"{destination} has been created!")
     
     def on_created(self, event : FileSystemEvent):
